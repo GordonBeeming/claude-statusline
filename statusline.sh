@@ -168,21 +168,27 @@ if [[ -n "$five_hour_pct" && "$five_hour_pct" != "null" ]]; then
   rate_display="⏱️ ${bar} ${pct_int}%${time_left}"
 elif [[ "$duration_ms" != "0" && "$duration_ms" != "null" ]]; then
   duration_secs=$(( ${duration_ms%.*} / 1000 ))
-  hours=$(( duration_secs / 3600 ))
-  mins=$(( (duration_secs % 3600) / 60 ))
-  rate_display="⏱️ ${hours}h${mins}m"
+  # Only show duration if session has actually been running (> 0 seconds)
+  if (( duration_secs > 0 )); then
+    hours=$(( duration_secs / 3600 ))
+    mins=$(( (duration_secs % 3600) / 60 ))
+    rate_display="⏱️ ${hours}h${mins}m"
+  fi
 fi
 
-# --- Context + tokens ---
+# --- Context + tokens (hide when session hasn't started yet) ---
 ctx_display=""
 if [[ "$ctx_size" != "0" && "$ctx_size" != "null" ]]; then
   ctx_int=${ctx_pct%.*}
-  ctx_bar=$(make_bar "$ctx_int" 10)
-  ctx_display="💭 ${ctx_bar} ${ctx_int}% ctx"
+  # Only show context bar if there's actual usage
+  if (( ctx_int > 0 )); then
+    ctx_bar=$(make_bar "$ctx_int" 10)
+    ctx_display="💭 ${ctx_bar} ${ctx_int}% ctx"
+  fi
 fi
 
 token_display=""
-if [[ "$total_input" != "0" && "$total_input" != "null" ]]; then
+if [[ "$total_input" != "0" && "$total_input" != "null" && "${total_input%.*}" -gt 0 ]]; then
   in_k=$(( ${total_input%.*} / 1000 ))
   out_k=$(( ${total_output%.*} / 1000 ))
   token_display="🧠 ${in_k}k in / ${out_k}k out"
