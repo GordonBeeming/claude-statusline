@@ -1,34 +1,50 @@
 # claude-statusline
 
-An enhanced status line for [Claude Code](https://claude.com/claude-code) that adds repo name, git branch info, session time tracking, and token usage to the cost/context display.
+An enhanced multi-line status line for [Claude Code](https://claude.com/claude-code) that adds repo name, git branch info, cost tracking, rate limits, and token usage — grouped by category across three lines.
 
 ## Features
 
 - Shows current repo name with a folder icon
 - GitButler support: displays active GitButler branches when on `gitbutler/workspace`
 - Falls back to regular git branch display when not using GitButler
-- Wraps [goccc](https://github.com/backstabslash/goccc) for cost tracking (session + daily cost in your currency)
+- Cost tracking via [goccc](https://github.com/backstabslash/goccc) (session + daily cost in your local currency)
 - Rate limit progress bar (5-hour window with time remaining, color-coded green/yellow/red)
 - Falls back to session duration display when rate limit data isn't available
-- Token usage display (context % with input/output token counts)
+- Context window progress bar and token usage display
 - Sets terminal tab title to repo name
 - Auto-updates from `main` once per day
 
 ## Status Line Example
 
 ```
-📂 xylem · 🌿 gb-branch-5 · 💸 A$1.21 session · 💰 A$48.00 today · 💭 11% ctx · 🔌 2 MCPs · 🤖 Opus 4.6 · ⏱️ ██░░░░░░░░ 23% 4h0m left · 🧠 11% (45k in/12k out)
+📂 xylem · 🌿 gb-branch-5 · 🤖 Opus 4.6
+💸 A$1.21 session · 💰 A$48.00 today · ⏱️ ██░░░░░░░░ 23% 4h0m left
+💭 █░░░░░░░░░ 11% ctx · 🧠 45k in / 12k out
 ```
+
+Each line groups related information:
+
+| Line | Purpose | Contents |
+|------|---------|----------|
+| 1 | **Identity** | 📂 Repo name · 🌿/🔀 Branch · 🤖 Model |
+| 2 | **Spend & limits** | 💸 Session cost · 💰 Daily cost · ⏱️ Rate limit bar |
+| 3 | **Technical** | 💭 Context usage bar · 🧠 Token counts |
+
+### Icons
 
 | Icon | Meaning |
 |------|---------|
 | 📂 | Repository name |
 | 🌿 | GitButler active branch(es) |
-| 🔀 | Regular git branch |
-| 💸 | Session cost |
-| 💰 | Daily cost |
+| 🔀 | Regular git branch (when not using GitButler) |
+| 🤖 | Current model |
+| 💸 | Session cost (local currency) |
+| 💰 | Daily cost (local currency) |
 | ⏱️ | 5-hour rate limit (progress bar + time remaining) |
-| 🧠 | Token usage (context % + input/output counts) |
+| 💭 | Context window usage (progress bar) |
+| 🧠 | Token counts (input / output) |
+
+Progress bars are color-coded: green (<70%), yellow (70-89%), red (90%+).
 
 ## Install
 
@@ -52,7 +68,7 @@ After running the installer, add this to your `~/.claude/settings.json`:
 
 ## Dependencies
 
-- [goccc](https://github.com/backstabslash/goccc) — CLI cost calculator for Claude Code
+- [goccc](https://github.com/backstabslash/goccc) — CLI cost calculator for Claude Code (session + daily costs with currency conversion)
 - [jq](https://jqlang.github.io/jq/) — for parsing JSON input and GitButler output
 - [GitButler CLI](https://docs.gitbutler.com/cli-overview) (`but`) — optional, for GitButler branch display
 
