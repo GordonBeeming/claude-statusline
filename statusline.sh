@@ -147,7 +147,8 @@ fi
 # --- Daily cost ---
 daily_cost_display=""
 if [[ "$daily_cost" != "0" && "$daily_cost" != "null" ]]; then
-  daily_cost_display="💰 $(format_cost "$daily_cost") today"
+  daily_cost_val=$(echo "$daily_cost $currency_rate" | awk '{printf "%.2f", $1 * $2}')
+  daily_cost_display="💰 $(format_cost "$daily_cost_val") today"
 fi
 
 # --- Rate limit bar ---
