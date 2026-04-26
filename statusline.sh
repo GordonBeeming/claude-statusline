@@ -107,17 +107,23 @@ make_bar() {
 # --- Get repo name ---
 repo_name=""
 in_git_repo=false
+toplevel=""
 if [[ -n "$cwd" ]]; then
-  repo_name=$(cd "$cwd" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null | xargs basename 2>/dev/null || true)
+  toplevel=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)
 fi
-if [[ -z "$repo_name" && -z "$cwd" ]] && git rev-parse --show-toplevel &>/dev/null; then
-  repo_name=$(basename "$(git rev-parse --show-toplevel)")
+if [[ -z "$toplevel" && -z "$cwd" ]]; then
+  toplevel=$(git rev-parse --show-toplevel 2>/dev/null || true)
 fi
-if [[ -n "$repo_name" ]]; then
+if [[ -n "$toplevel" ]]; then
+  repo_name=$(basename "$toplevel")
   in_git_repo=true
 elif [[ -n "$cwd" ]]; then
-  # Fallback: not in a git repo, show the current folder name
+  # Fallback: not in a git repo, show the current folder name (handles paths with spaces)
   repo_name=$(basename "$cwd")
+else
+  # Fallback: cwd unset and not in a git repo, use the process working directory
+  current_dir=$(pwd -P 2>/dev/null || pwd 2>/dev/null || true)
+  [[ -n "$current_dir" ]] && repo_name=$(basename "$current_dir")
 fi
 
 # --- Get branch info ---
