@@ -106,11 +106,24 @@ make_bar() {
 
 # --- Get repo name ---
 repo_name=""
+in_git_repo=false
+toplevel=""
 if [[ -n "$cwd" ]]; then
-  repo_name=$(cd "$cwd" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null | xargs basename 2>/dev/null || true)
+  toplevel=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)
 fi
-if [[ -z "$repo_name" ]] && git rev-parse --show-toplevel &>/dev/null; then
-  repo_name=$(basename "$(git rev-parse --show-toplevel)")
+if [[ -z "$toplevel" && -z "$cwd" ]]; then
+  toplevel=$(git rev-parse --show-toplevel 2>/dev/null || true)
+fi
+if [[ -n "$toplevel" ]]; then
+  repo_name=$(basename "$toplevel")
+  in_git_repo=true
+elif [[ -n "$cwd" ]]; then
+  # Fallback: not in a git repo, show the current folder name (handles paths with spaces)
+  repo_name=$(basename "$cwd")
+else
+  # Fallback: cwd unset and not in a git repo, use the process working directory
+  current_dir=$(pwd -P 2>/dev/null || pwd 2>/dev/null || true)
+  [[ -n "$current_dir" ]] && repo_name=$(basename "$current_dir")
 fi
 
 # --- Get branch info ---
@@ -215,16 +228,18 @@ if [[ "$total_input" != "0" && "$total_input" != "null" && "${total_input%.*}" -
   token_display="🧠 ${in_k}k in / ${out_k}k out"
 fi
 
-# --- Set terminal tab title ---
-if [[ -n "$repo_name" ]]; then
-  printf '\033]0;%s\007' "$repo_name" >&2
-fi
-
 # --- Build multi-line output ---
-# Line 1: Identity — repo, branch
+# Line 1: Identity — repo, branch (or folder + no-git marker)
 line1_parts=()
-[[ -n "$repo_name" ]] && line1_parts+=("📂 ${repo_name}")
-[[ -n "$branch_info" ]] && line1_parts+=("$branch_info")
+if [[ -n "$repo_name" ]]; then
+  if [[ "$in_git_repo" == "true" ]]; then
+    line1_parts+=("📂 ${repo_name}")
+    [[ -n "$branch_info" ]] && line1_parts+=("$branch_info")
+  else
+    line1_parts+=("📁 ${repo_name}")
+    line1_parts+=("$(printf '%b🚫 no git%b' "$DIM" "$RESET")")
+  fi
+fi
 
 # Line 2: Model — name, effort, thinking flag
 line2_parts=()
