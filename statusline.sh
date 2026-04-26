@@ -55,8 +55,10 @@ eval "$(echo "$stdin_data" | jq -r '
   @sh "total_input=\(.context_window.total_input_tokens // 0)",
   @sh "total_output=\(.context_window.total_output_tokens // 0)",
   @sh "five_hour_pct=\(.rate_limits.five_hour.used_percentage // "")",
-  @sh "five_hour_resets=\(.rate_limits.five_hour.resets_at // "")"
-' 2>/dev/null || echo 'cwd=""; model_name=""; model_id=""; session_cost_usd=0; duration_ms=0; ctx_pct=0; ctx_size=0; total_input=0; total_output=0; five_hour_pct=""; five_hour_resets=""')"
+  @sh "five_hour_resets=\(.rate_limits.five_hour.resets_at // "")",
+  @sh "effort_level=\(.effort.level // "")",
+  @sh "thinking_enabled=\(.thinking.enabled // false)"
+' 2>/dev/null || echo 'cwd=""; model_name=""; model_id=""; session_cost_usd=0; duration_ms=0; ctx_pct=0; ctx_size=0; total_input=0; total_output=0; five_hour_pct=""; five_hour_resets=""; effort_level=""; thinking_enabled=false')"
 
 # --- Get currency and daily cost from goccc ---
 currency_symbol="$"
@@ -137,6 +139,24 @@ if [[ -n "$model_name" ]]; then
   model_display="🤖 ${model_name}"
 fi
 
+# --- Effort level ---
+effort_display=""
+if [[ -n "$effort_level" ]]; then
+  case "$effort_level" in
+    low)       effort_display=$(printf '⚡ %b%s%b' "$DIM" "$effort_level" "$RESET") ;;
+    medium)    effort_display="⚡ ${effort_level}" ;;
+    high)      effort_display=$(printf '⚡ %b%s%b' "$YELLOW" "$effort_level" "$RESET") ;;
+    xhigh|max) effort_display=$(printf '⚡ %b%s%b' "$RED" "$effort_level" "$RESET") ;;
+    *)         effort_display="⚡ ${effort_level}" ;;
+  esac
+fi
+
+# --- Thinking flag ---
+thinking_display=""
+if [[ "$thinking_enabled" == "true" ]]; then
+  thinking_display="🤔"
+fi
+
 # --- Session cost (convert USD to local currency) ---
 session_cost_local=""
 if [[ "$session_cost_usd" != "0" && "$session_cost_usd" != "null" ]]; then
@@ -201,22 +221,27 @@ if [[ -n "$repo_name" ]]; then
 fi
 
 # --- Build multi-line output ---
-# Line 1: Identity — repo, branch, model
+# Line 1: Identity — repo, branch
 line1_parts=()
 [[ -n "$repo_name" ]] && line1_parts+=("📂 ${repo_name}")
 [[ -n "$branch_info" ]] && line1_parts+=("$branch_info")
-[[ -n "$model_display" ]] && line1_parts+=("$model_display")
 
-# Line 2: Spend & limits — session cost, daily cost, rate limit
+# Line 2: Model — name, effort, thinking flag
 line2_parts=()
-[[ -n "$session_cost_local" ]] && line2_parts+=("$session_cost_local")
-[[ -n "$daily_cost_display" ]] && line2_parts+=("$daily_cost_display")
-[[ -n "$rate_display" ]] && line2_parts+=("$rate_display")
+[[ -n "$model_display" ]] && line2_parts+=("$model_display")
+[[ -n "$effort_display" ]] && line2_parts+=("$effort_display")
+[[ -n "$thinking_display" ]] && line2_parts+=("$thinking_display")
 
-# Line 3: Technical — context, tokens
+# Line 3: Spend & limits — session cost, daily cost, rate limit
 line3_parts=()
-[[ -n "$ctx_display" ]] && line3_parts+=("$ctx_display")
-[[ -n "$token_display" ]] && line3_parts+=("$token_display")
+[[ -n "$session_cost_local" ]] && line3_parts+=("$session_cost_local")
+[[ -n "$daily_cost_display" ]] && line3_parts+=("$daily_cost_display")
+[[ -n "$rate_display" ]] && line3_parts+=("$rate_display")
+
+# Line 4: Technical — context, tokens
+line4_parts=()
+[[ -n "$ctx_display" ]] && line4_parts+=("$ctx_display")
+[[ -n "$token_display" ]] && line4_parts+=("$token_display")
 
 # Join parts within each line
 join_parts() {
@@ -243,6 +268,10 @@ fi
 if (( ${#line3_parts[@]} > 0 )); then
   [[ -n "$output" ]] && output+=$'\n'
   output+=$(join_parts "${line3_parts[@]}")
+fi
+if (( ${#line4_parts[@]} > 0 )); then
+  [[ -n "$output" ]] && output+=$'\n'
+  output+=$(join_parts "${line4_parts[@]}")
 fi
 
 echo -e "$output"
