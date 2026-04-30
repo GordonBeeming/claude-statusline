@@ -12,14 +12,13 @@ An enhanced multi-line status line for [Claude Code](https://claude.com/claude-c
 - Rate limit progress bar (5-hour window with time remaining, color-coded green/yellow/red)
 - Falls back to session duration display when rate limit data isn't available
 - Context window progress bar and token usage display
-- Sets terminal tab title to repo name
 - Auto-updates from `main` once per day
 
 ## Status Line Example
 
 ```
-📂 xylem · 🌿 gb-branch-5
-🤖 Opus 4.7 · ⚡ high · 🤔
+📂 xylem · 🤖 Opus 4.7 · ⚡ high · 🤔
+🌿 gb/feature-a, gb/feature-b, gb/feature-c + 2 more
 💸 A$1.21 session · 💰 A$48.00 today · ⏱️ ██░░░░░░░░ 23% 4h0m left
 💭 █░░░░░░░░░ 11% ctx · 🧠 45k in / 12k out
 ```
@@ -28,10 +27,12 @@ Each line groups related information:
 
 | Line | Purpose | Contents |
 |------|---------|----------|
-| 1 | **Identity** | 📂 Repo name · 🌿/🔀 Branch |
-| 2 | **Model** | 🤖 Model name · ⚡ Effort level · 🤔 Thinking flag |
+| 1 | **Identity + Model** | 📂 Repo name · 🤖 Model · ⚡ Effort · 🤔 Thinking flag |
+| 2 | **Branches** | 🌿/🔀 Branch (or as many GitButler branches as fit + `+ N more`) |
 | 3 | **Spend & limits** | 💸 Session cost · 💰 Daily cost · ⏱️ Rate limit bar |
 | 4 | **Technical** | 💭 Context usage bar · 🧠 Token counts |
+
+The branches line uses the full terminal width: it shows as many full branch names as fit (comma-separated), then ` + N more` for the rest. A single long name is truncated with `…`.
 
 ### Icons
 

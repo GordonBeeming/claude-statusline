@@ -126,24 +126,84 @@ else
   [[ -n "$current_dir" ]] && repo_name=$(basename "$current_dir")
 fi
 
-# --- Get branch info ---
+# --- Determine terminal width (for branch truncation) ---
+term_width=${COLUMNS:-0}
+if (( term_width == 0 )); then
+  term_width=$(tput cols 2>/dev/null || echo 100)
+fi
+
+# Budget for the dedicated branches line: emoji(2) + space(1) + a small safety margin.
+branch_line_budget=$(( term_width - 3 - 2 ))
+if (( branch_line_budget < 20 )); then branch_line_budget=20; fi
+
+# --- Get branch info (rendered alone on its own line) ---
 branch_info=""
 current_branch=$(git branch --show-current 2>/dev/null || echo "")
 if [[ "$current_branch" == "gitbutler/workspace" ]]; then
-  branches=""
+  branch_emoji="🌿"
+  branch_names=()
   if command -v but &>/dev/null; then
-    branches=$(but branch list --no-check --no-ahead --json 2>/dev/null \
-      | jq -r '.appliedStacks[].heads[].name' 2>/dev/null \
-      | paste -sd ',' - 2>/dev/null \
-      | sed 's/,/, /g' || true)
+    while IFS= read -r b; do
+      [[ -n "$b" ]] && branch_names+=("$b")
+    done < <(but branch list --no-check --no-ahead --json 2>/dev/null \
+      | jq -r '.appliedStacks[].heads[].name' 2>/dev/null || true)
   fi
-  if [[ -n "$branches" ]]; then
-    branch_info="🌿 ${branches}"
+  branch_count=${#branch_names[@]}
+
+  if (( branch_count == 0 )); then
+    branch_info="${branch_emoji} gitbutler/workspace"
+  elif (( branch_count == 1 )); then
+    name="${branch_names[0]}"
+    if (( ${#name} > branch_line_budget )); then
+      name="${name:0:$((branch_line_budget - 1))}…"
+    fi
+    branch_info="${branch_emoji} ${name}"
   else
-    branch_info="🌿 gitbutler/workspace"
+    # Pack as many full names as fit, then suffix " + N more" for the remainder.
+    shown=""
+    shown_count=0
+    for name in "${branch_names[@]}"; do
+      if [[ -n "$shown" ]]; then
+        candidate="${shown}, ${name}"
+      else
+        candidate="${name}"
+      fi
+      remaining_after=$(( branch_count - shown_count - 1 ))
+      suffix=""
+      (( remaining_after > 0 )) && suffix=" + ${remaining_after} more"
+      if (( ${#candidate} + ${#suffix} <= branch_line_budget )); then
+        shown="$candidate"
+        shown_count=$(( shown_count + 1 ))
+      else
+        break
+      fi
+    done
+    if (( shown_count == 0 )); then
+      # Even the first name doesn't fit — truncate it and summarise the rest.
+      remaining_after=$(( branch_count - 1 ))
+      suffix=" + ${remaining_after} more"
+      first_budget=$(( branch_line_budget - ${#suffix} ))
+      (( first_budget < 8 )) && first_budget=8
+      first="${branch_names[0]}"
+      if (( ${#first} > first_budget )); then
+        first="${first:0:$((first_budget - 1))}…"
+      fi
+      branch_info="${branch_emoji} ${first}${suffix}"
+    else
+      remaining_after=$(( branch_count - shown_count ))
+      if (( remaining_after > 0 )); then
+        branch_info="${branch_emoji} ${shown} + ${remaining_after} more"
+      else
+        branch_info="${branch_emoji} ${shown}"
+      fi
+    fi
   fi
 elif [[ -n "$current_branch" ]]; then
-  branch_info="🔀 ${current_branch}"
+  truncated_branch="$current_branch"
+  if (( ${#truncated_branch} > branch_line_budget )); then
+    truncated_branch="${truncated_branch:0:$((branch_line_budget - 1))}…"
+  fi
+  branch_info="🔀 ${truncated_branch}"
 fi
 
 # --- Model display ---
@@ -229,23 +289,23 @@ if [[ "$total_input" != "0" && "$total_input" != "null" && "${total_input%.*}" -
 fi
 
 # --- Build multi-line output ---
-# Line 1: Identity — repo, branch (or folder + no-git marker)
+# Line 1: Folder + model — folder, model name, effort, thinking flag
 line1_parts=()
 if [[ -n "$repo_name" ]]; then
   if [[ "$in_git_repo" == "true" ]]; then
     line1_parts+=("📂 ${repo_name}")
-    [[ -n "$branch_info" ]] && line1_parts+=("$branch_info")
   else
     line1_parts+=("📁 ${repo_name}")
     line1_parts+=("$(printf '%b🚫 no git%b' "$DIM" "$RESET")")
   fi
 fi
+[[ -n "$model_display" ]] && line1_parts+=("$model_display")
+[[ -n "$effort_display" ]] && line1_parts+=("$effort_display")
+[[ -n "$thinking_display" ]] && line1_parts+=("$thinking_display")
 
-# Line 2: Model — name, effort, thinking flag
+# Line 2: Branches (alone — gets the full terminal width)
 line2_parts=()
-[[ -n "$model_display" ]] && line2_parts+=("$model_display")
-[[ -n "$effort_display" ]] && line2_parts+=("$effort_display")
-[[ -n "$thinking_display" ]] && line2_parts+=("$thinking_display")
+[[ -n "$branch_info" ]] && line2_parts+=("$branch_info")
 
 # Line 3: Spend & limits — session cost, daily cost, rate limit
 line3_parts=()
