@@ -126,6 +126,20 @@ else
   [[ -n "$current_dir" ]] && repo_name=$(basename "$current_dir")
 fi
 
+# --- Determine terminal width (for branch truncation) ---
+term_width=${COLUMNS:-0}
+if (( term_width == 0 )); then
+  term_width=$(tput cols 2>/dev/null || echo 100)
+fi
+
+# --- Compute branch length budget for line 1 ---
+# Line 1 layout: "📂 <repo> · 🌿 <branch>" — emojis count as ~2 display cols.
+# Fixed: folder_emoji(2) + space(1) + repo_name + " · "(3) + branch_emoji(2) + space(1)
+fixed_len=$(( 2 + 1 + ${#repo_name} + 3 + 2 + 1 ))
+max_branch_len=$(( term_width - fixed_len - 2 ))
+if (( max_branch_len < 20 )); then max_branch_len=20; fi
+if (( max_branch_len > 60 )); then max_branch_len=60; fi
+
 # --- Get branch info ---
 branch_info=""
 current_branch=$(git branch --show-current 2>/dev/null || echo "")
@@ -143,15 +157,19 @@ if [[ "$current_branch" == "gitbutler/workspace" ]]; then
   if (( branch_count > 1 )); then
     branch_info="🌿 ${branch_count} branches"
   elif (( branch_count == 1 )); then
-    if (( ${#first_branch} > 30 )); then
-      first_branch="${first_branch:0:29}…"
+    if (( ${#first_branch} > max_branch_len )); then
+      first_branch="${first_branch:0:$((max_branch_len - 1))}…"
     fi
     branch_info="🌿 ${first_branch}"
   else
     branch_info="🌿 gitbutler/workspace"
   fi
 elif [[ -n "$current_branch" ]]; then
-  branch_info="🔀 ${current_branch}"
+  truncated_branch="$current_branch"
+  if (( ${#truncated_branch} > max_branch_len )); then
+    truncated_branch="${truncated_branch:0:$((max_branch_len - 1))}…"
+  fi
+  branch_info="🔀 ${truncated_branch}"
 fi
 
 # --- Model display ---
