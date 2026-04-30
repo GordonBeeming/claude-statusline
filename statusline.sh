@@ -130,15 +130,23 @@ fi
 branch_info=""
 current_branch=$(git branch --show-current 2>/dev/null || echo "")
 if [[ "$current_branch" == "gitbutler/workspace" ]]; then
-  branches=""
+  branch_count=0
+  first_branch=""
   if command -v but &>/dev/null; then
-    branches=$(but branch list --no-check --no-ahead --json 2>/dev/null \
-      | jq -r '.appliedStacks[].heads[].name' 2>/dev/null \
-      | paste -sd ',' - 2>/dev/null \
-      | sed 's/,/, /g' || true)
+    branch_list=$(but branch list --no-check --no-ahead --json 2>/dev/null \
+      | jq -r '.appliedStacks[].heads[].name' 2>/dev/null || true)
+    if [[ -n "$branch_list" ]]; then
+      branch_count=$(echo "$branch_list" | grep -c .)
+      first_branch=$(echo "$branch_list" | head -1)
+    fi
   fi
-  if [[ -n "$branches" ]]; then
-    branch_info="🌿 ${branches}"
+  if (( branch_count > 1 )); then
+    branch_info="🌿 ${branch_count} branches"
+  elif (( branch_count == 1 )); then
+    if (( ${#first_branch} > 30 )); then
+      first_branch="${first_branch:0:29}…"
+    fi
+    branch_info="🌿 ${first_branch}"
   else
     branch_info="🌿 gitbutler/workspace"
   fi
