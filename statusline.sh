@@ -72,15 +72,22 @@ if command -v goccc &>/dev/null; then
 fi
 
 # --- Helper: format cost with color ---
+# Session vs daily spending have very different distributions — sessions are
+# usually small with a long tail; daily totals are the aggregate.
 format_cost() {
   local cost=$1
+  local kind=${2:-session}  # session | daily
+  local yellow_at red_at
+  case "$kind" in
+    daily)  yellow_at=200; red_at=400 ;;
+    *)      yellow_at=75;  red_at=150 ;;
+  esac
   local formatted
   formatted=$(printf '%s%.2f' "$currency_symbol" "$cost")
-  # Color thresholds (in local currency)
   local cost_int=${cost%.*}
-  if (( cost_int >= 50 )); then
+  if (( cost_int >= red_at )); then
     printf '%b%s%b' "$RED" "$formatted" "$RESET"
-  elif (( cost_int >= 25 )); then
+  elif (( cost_int >= yellow_at )); then
     printf '%b%s%b' "$YELLOW" "$formatted" "$RESET"
   else
     printf '%s' "$formatted"
@@ -241,7 +248,7 @@ fi
 daily_cost_display=""
 if [[ "$daily_cost" != "0" && "$daily_cost" != "null" ]]; then
   daily_cost_val=$(echo "$daily_cost $currency_rate" | awk '{printf "%.2f", $1 * $2}')
-  daily_cost_display="💰 $(format_cost "$daily_cost_val") today"
+  daily_cost_display="💰 $(format_cost "$daily_cost_val" daily) today"
 fi
 
 # --- Rate limit bar ---
