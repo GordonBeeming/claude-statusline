@@ -65,6 +65,10 @@ eval "$(echo "$stdin_data" | jq -r '
 # network entirely so $-only users incur zero overhead.
 currency_code="${STATUSLINE_CURRENCY:-AUD}"
 currency_code=$(printf '%s' "$currency_code" | tr '[:lower:]' '[:upper:]')
+# Validate — the code interpolates into a cache file path, so anything off the
+# ISO 4217 shape (3 uppercase letters) gets rejected to keep a value like
+# `../foo` from escaping the cache dir.
+[[ "$currency_code" =~ ^[A-Z]{3}$ ]] || currency_code="AUD"
 
 case "$currency_code" in
   USD) currency_symbol='$'   ;;
@@ -90,8 +94,12 @@ if [[ "$currency_code" != "USD" ]]; then
   if [[ -f "$fx_cache_file" ]]; then
     fx_rate=$(sed -n '1p' "$fx_cache_file" 2>/dev/null || echo "")
     fx_ts=$(sed -n '2p' "$fx_cache_file" 2>/dev/null || echo 0)
-    [[ -z "$fx_ts" ]] && fx_ts=0
   fi
+  # A corrupted/partial cache must not crash the render under `set -e`. The
+  # rate is validated against a decimal-number shape; the timestamp against
+  # an integer shape. Anything else is treated as cache-miss.
+  [[ "$fx_rate" =~ ^[0-9]+(\.[0-9]+)?$ ]] || fx_rate=""
+  [[ "$fx_ts" =~ ^[0-9]+$ ]] || fx_ts=0
   fx_age=$(( fx_now - fx_ts ))
   if [[ -z "$fx_rate" || "$fx_age" -ge 86400 ]]; then
     fetched=$(curl -sSL --connect-timeout 2 --max-time 3 \
@@ -123,20 +131,29 @@ if [[ -f "$daily_cache_file" ]]; then
   c_total=$(sed -n '1p' "$daily_cache_file" 2>/dev/null || echo "")
   c_ts=$(sed -n '2p' "$daily_cache_file" 2>/dev/null || echo 0)
   c_day=$(sed -n '3p' "$daily_cache_file" 2>/dev/null || echo "")
-  [[ -z "$c_ts" ]] && c_ts=0
-  if [[ "$c_day" == "$today_local" && $(( $(date +%s) - c_ts )) -lt 60 && -n "$c_total" ]]; then
+  # Treat any corrupt/non-numeric cache line as a miss — the script runs
+  # under `set -e` so an arithmetic error here would abort the whole render.
+  [[ "$c_ts" =~ ^[0-9]+$ ]] || c_ts=0
+  [[ "$c_total" =~ ^[0-9]+(\.[0-9]+)?$ ]] || c_total=""
+  if [[ -n "$c_total" && "$c_day" == "$today_local" && $(( $(date +%s) - c_ts )) -lt 60 ]]; then
     daily_cost_usd="$c_total"
     need_recompute=false
   fi
 fi
 if [[ "$need_recompute" == "true" ]]; then
-  # Local-day window expressed as UTC epoch bounds. BSD `date` syntax — this
-  # repo is macOS-only (the installer uses Homebrew).
-  day_lo=$(date -j -f '%Y-%m-%d %H:%M:%S' "${today_local} 00:00:00" '+%s' 2>/dev/null || echo 0)
-  day_hi=$(( day_lo + 86400 ))
+  # Local-day window expressed as UTC epoch bounds. BSD `date -j -f` (macOS)
+  # and GNU `date -d` use incompatible syntax for parsing a date string —
+  # try both so the script keeps working if anyone runs it on Linux. If
+  # neither succeeds we skip the recompute entirely rather than silently
+  # treating "epoch 0" as today (which would zero out the daily total).
+  day_lo=$(date -j -f '%Y-%m-%d %H:%M:%S' "${today_local} 00:00:00" '+%s' 2>/dev/null \
+    || date -d "${today_local} 00:00:00" '+%s' 2>/dev/null \
+    || echo "")
+  day_hi=""
+  [[ -n "$day_lo" ]] && day_hi=$(( day_lo + 86400 ))
   projects_dir="${HOME}/.claude/projects"
   jsonl_files=()
-  if [[ -d "$projects_dir" ]]; then
+  if [[ -n "$day_lo" && -d "$projects_dir" ]]; then
     # 26h window of mtimes catches anything that could still be writing
     # records inside today's local-time window.
     while IFS= read -r f; do
@@ -146,17 +163,25 @@ if [[ "$need_recompute" == "true" ]]; then
   if (( ${#jsonl_files[@]} > 0 )); then
     # Pricing table — USD per 1M tokens. Source: https://www.anthropic.com/pricing
     # Buckets keyed by model family substring; 1h cache-write is 2x the 5m
-    # rate per Anthropic's published rates. Legacy haiku-3 (non-3-5) gets its
-    # own branch since its rates are an order of magnitude lower than haiku-4.
+    # rate per Anthropic's published rates. Legacy Claude 3 Haiku (e.g.
+    # `claude-3-haiku-20240307`) gets its own branch — its rates are an
+    # order of magnitude lower than 3.5/4-family Haiku. The 3.5 case is
+    # matched *before* the legacy case so model IDs like
+    # `claude-3-5-haiku-20241022` don't fall into the cheaper bucket.
     # Unknown models contribute 0 so a new release doesn't silently inflate
     # the total — update this table when new pricing lands.
-    computed=$(jq -r --argjson lo "$day_lo" --argjson hi "$day_hi" '
+    # `set -e` + `pipefail` would abort the render if jq tripped on a
+    # half-written .jsonl line (concurrent writes from active sessions are
+    # common). Wrap each stage with `|| true` so a transient parse error
+    # degrades to a zero daily cost for this tick instead.
+    computed=$( (jq -r --argjson lo "$day_lo" --argjson hi "$day_hi" '
       def model_rate($m):
         ($m | ascii_downcase) as $lm
-        | if   ($lm | test("opus"))           then {i:15,   o:75,   cw5:18.75, cw1h:30,   cr:1.50}
-          elif ($lm | test("sonnet"))         then {i:3,    o:15,   cw5:3.75,  cw1h:6,    cr:0.30}
-          elif ($lm | test("haiku-3-[^5]"))   then {i:0.25, o:1.25, cw5:0.30,  cw1h:0.60, cr:0.03}
-          elif ($lm | test("haiku"))          then {i:1,    o:5,    cw5:1.25,  cw1h:2.50, cr:0.10}
+        | if   ($lm | test("opus"))                  then {i:15,   o:75,   cw5:18.75, cw1h:30,   cr:1.50}
+          elif ($lm | test("sonnet"))                then {i:3,    o:15,   cw5:3.75,  cw1h:6,    cr:0.30}
+          elif ($lm | test("3-5-haiku|haiku-3-5"))   then {i:1,    o:5,    cw5:1.25,  cw1h:2.50, cr:0.10}
+          elif ($lm | test("3-haiku|haiku-3"))       then {i:0.25, o:1.25, cw5:0.30,  cw1h:0.60, cr:0.03}
+          elif ($lm | test("haiku"))                 then {i:1,    o:5,    cw5:1.25,  cw1h:2.50, cr:0.10}
           else null end;
       select(.timestamp != null and (.message.usage // null) != null and (.message.model // null) != null)
       | (((.timestamp[0:19] + "Z") | fromdateiso8601?) // 0) as $ts
@@ -172,8 +197,8 @@ if [[ "$need_recompute" == "true" ]]; then
                 + (($u.cache_creation.ephemeral_1h_input_tokens // 0) * $r.cw1h)
              else (($u.cache_creation_input_tokens // 0) * $r.cw5)
            end)) / 1000000
-    ' "${jsonl_files[@]}" 2>/dev/null \
-      | awk 'BEGIN{s=0} {s+=$1} END{printf "%.4f", s+0}')
+    ' "${jsonl_files[@]}" 2>/dev/null || true) \
+      | awk 'BEGIN{s=0} {s+=$1} END{printf "%.4f", s+0}' || true)
     [[ -n "$computed" ]] && daily_cost_usd="$computed"
   fi
   mkdir -p "$INSTALL_DIR" 2>/dev/null || true

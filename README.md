@@ -78,7 +78,7 @@ After running the installer, add this to your `~/.claude/settings.json`:
 
 ## Currency
 
-Set `STATUSLINE_CURRENCY` (default `AUD`) to choose the display currency. Set it to `USD` for zero-network behaviour. Other supported codes with a custom symbol: `GBP`, `EUR`, `NZD`, `CAD`, `JPY`. Any ISO 4217 code with a rate on [open.er-api.com](https://open.er-api.com) also works; unknown codes render as `<CODE> 12.34`.
+Set `STATUSLINE_CURRENCY` (default `AUD`) to choose the display currency. Set it to `USD` for zero-network behaviour. Other supported codes with a custom symbol: `GBP`, `EUR`, `NZD`, `CAD`, `JPY`. Any ISO 4217 code with a rate on [open.er-api.com](https://open.er-api.com) also works; unknown codes render with the code as a prefix (e.g. `CHF 12.34`). Anything that doesn't match the ISO shape (three uppercase letters) silently falls back to AUD.
 
 The USD→local rate is fetched once per day and cached at `~/.claude/scripts/.fx-cache-<CCY>`. If the fetch fails and no cached rate is available, the statusline falls back to USD silently.
 
