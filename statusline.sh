@@ -135,9 +135,14 @@ if [[ -f "$daily_cache_file" ]]; then
   # under `set -e` so an arithmetic error here would abort the whole render.
   [[ "$c_ts" =~ ^[0-9]+$ ]] || c_ts=0
   [[ "$c_total" =~ ^[0-9]+(\.[0-9]+)?$ ]] || c_total=""
-  if [[ -n "$c_total" && "$c_day" == "$today_local" && $(( $(date +%s) - c_ts )) -lt 60 ]]; then
+  # Carry today's last known total forward as a fallback so a transient
+  # recompute failure (jq parse error, date parse failure) doesn't blank
+  # out the daily display — the next successful recompute will refresh it.
+  if [[ -n "$c_total" && "$c_day" == "$today_local" ]]; then
     daily_cost_usd="$c_total"
-    need_recompute=false
+    if (( $(date +%s) - c_ts < 60 )); then
+      need_recompute=false
+    fi
   fi
 fi
 if [[ "$need_recompute" == "true" ]]; then
@@ -149,61 +154,78 @@ if [[ "$need_recompute" == "true" ]]; then
   day_lo=$(date -j -f '%Y-%m-%d %H:%M:%S' "${today_local} 00:00:00" '+%s' 2>/dev/null \
     || date -d "${today_local} 00:00:00" '+%s' 2>/dev/null \
     || echo "")
-  day_hi=""
-  [[ -n "$day_lo" ]] && day_hi=$(( day_lo + 86400 ))
-  projects_dir="${HOME}/.claude/projects"
-  jsonl_files=()
-  if [[ -n "$day_lo" && -d "$projects_dir" ]]; then
-    # 26h window of mtimes catches anything that could still be writing
-    # records inside today's local-time window.
-    while IFS= read -r f; do
-      [[ -n "$f" ]] && jsonl_files+=("$f")
-    done < <(find "$projects_dir" -type f -name '*.jsonl' -mmin -1560 2>/dev/null)
+  # recompute_ok stays false on any failure path (date parse failure, jq
+  # parse error on a half-written .jsonl). Only a successful recompute
+  # writes the cache — otherwise we'd clobber the last good value with 0
+  # and silently suppress the daily display for the full 60s TTL.
+  recompute_ok=false
+  if [[ -n "$day_lo" ]]; then
+    day_hi=$(( day_lo + 86400 ))
+    projects_dir="${HOME}/.claude/projects"
+    jsonl_files=()
+    if [[ -d "$projects_dir" ]]; then
+      # 26h window of mtimes catches anything that could still be writing
+      # records inside today's local-time window.
+      while IFS= read -r f; do
+        [[ -n "$f" ]] && jsonl_files+=("$f")
+      done < <(find "$projects_dir" -type f -name '*.jsonl' -mmin -1560 2>/dev/null)
+    fi
+    if (( ${#jsonl_files[@]} > 0 )); then
+      # Pricing table — USD per 1M tokens. Source: https://www.anthropic.com/pricing
+      # Buckets keyed by model family substring; 1h cache-write is 2x the 5m
+      # rate per Anthropic's published rates. Legacy Claude 3 Haiku (e.g.
+      # `claude-3-haiku-20240307`) gets its own branch — its rates are an
+      # order of magnitude lower than 3.5/4-family Haiku. The 3.5 case is
+      # matched *before* the legacy case so model IDs like
+      # `claude-3-5-haiku-20241022` don't fall into the cheaper bucket.
+      # Unknown models contribute 0 so a new release doesn't silently
+      # inflate the total — update this table when new pricing lands.
+      # Disable `pipefail` while running the pipeline so a half-written
+      # `.jsonl` line aborting jq doesn't kill the script. We capture
+      # jq's exit code via PIPESTATUS and only treat the result as a
+      # successful recompute when jq itself returned 0.
+      set +o pipefail
+      jq_raw=$(jq -r --argjson lo "$day_lo" --argjson hi "$day_hi" '
+        def model_rate($m):
+          ($m | ascii_downcase) as $lm
+          | if   ($lm | test("opus"))                  then {i:15,   o:75,   cw5:18.75, cw1h:30,   cr:1.50}
+            elif ($lm | test("sonnet"))                then {i:3,    o:15,   cw5:3.75,  cw1h:6,    cr:0.30}
+            elif ($lm | test("3-5-haiku|haiku-3-5"))   then {i:1,    o:5,    cw5:1.25,  cw1h:2.50, cr:0.10}
+            elif ($lm | test("3-haiku|haiku-3"))       then {i:0.25, o:1.25, cw5:0.30,  cw1h:0.60, cr:0.03}
+            elif ($lm | test("haiku"))                 then {i:1,    o:5,    cw5:1.25,  cw1h:2.50, cr:0.10}
+            else null end;
+        select(.timestamp != null and (.message.usage // null) != null and (.message.model // null) != null)
+        | (((.timestamp[0:19] + "Z") | fromdateiso8601?) // 0) as $ts
+        | select($ts >= $lo and $ts < $hi)
+        | model_rate(.message.model) as $r
+        | select($r != null)
+        | .message.usage as $u
+        | ((($u.input_tokens // 0)              * $r.i)
+          + (($u.output_tokens // 0)            * $r.o)
+          + (($u.cache_read_input_tokens // 0)  * $r.cr)
+          + (if ($u.cache_creation // null) != null
+               then (($u.cache_creation.ephemeral_5m_input_tokens // 0) * $r.cw5)
+                  + (($u.cache_creation.ephemeral_1h_input_tokens // 0) * $r.cw1h)
+               else (($u.cache_creation_input_tokens // 0) * $r.cw5)
+             end)) / 1000000
+      ' "${jsonl_files[@]}" 2>/dev/null)
+      jq_exit=$?
+      set -o pipefail
+      if [[ "$jq_exit" -eq 0 ]]; then
+        daily_cost_usd=$(printf '%s\n' "$jq_raw" | awk 'BEGIN{s=0} {s+=$1} END{printf "%.4f", s+0}')
+        recompute_ok=true
+      fi
+    else
+      # No transcript files to scan — legitimate zero, safe to cache.
+      daily_cost_usd=0
+      recompute_ok=true
+    fi
   fi
-  if (( ${#jsonl_files[@]} > 0 )); then
-    # Pricing table — USD per 1M tokens. Source: https://www.anthropic.com/pricing
-    # Buckets keyed by model family substring; 1h cache-write is 2x the 5m
-    # rate per Anthropic's published rates. Legacy Claude 3 Haiku (e.g.
-    # `claude-3-haiku-20240307`) gets its own branch — its rates are an
-    # order of magnitude lower than 3.5/4-family Haiku. The 3.5 case is
-    # matched *before* the legacy case so model IDs like
-    # `claude-3-5-haiku-20241022` don't fall into the cheaper bucket.
-    # Unknown models contribute 0 so a new release doesn't silently inflate
-    # the total — update this table when new pricing lands.
-    # `set -e` + `pipefail` would abort the render if jq tripped on a
-    # half-written .jsonl line (concurrent writes from active sessions are
-    # common). Wrap each stage with `|| true` so a transient parse error
-    # degrades to a zero daily cost for this tick instead.
-    computed=$( (jq -r --argjson lo "$day_lo" --argjson hi "$day_hi" '
-      def model_rate($m):
-        ($m | ascii_downcase) as $lm
-        | if   ($lm | test("opus"))                  then {i:15,   o:75,   cw5:18.75, cw1h:30,   cr:1.50}
-          elif ($lm | test("sonnet"))                then {i:3,    o:15,   cw5:3.75,  cw1h:6,    cr:0.30}
-          elif ($lm | test("3-5-haiku|haiku-3-5"))   then {i:1,    o:5,    cw5:1.25,  cw1h:2.50, cr:0.10}
-          elif ($lm | test("3-haiku|haiku-3"))       then {i:0.25, o:1.25, cw5:0.30,  cw1h:0.60, cr:0.03}
-          elif ($lm | test("haiku"))                 then {i:1,    o:5,    cw5:1.25,  cw1h:2.50, cr:0.10}
-          else null end;
-      select(.timestamp != null and (.message.usage // null) != null and (.message.model // null) != null)
-      | (((.timestamp[0:19] + "Z") | fromdateiso8601?) // 0) as $ts
-      | select($ts >= $lo and $ts < $hi)
-      | model_rate(.message.model) as $r
-      | select($r != null)
-      | .message.usage as $u
-      | ((($u.input_tokens // 0)              * $r.i)
-        + (($u.output_tokens // 0)            * $r.o)
-        + (($u.cache_read_input_tokens // 0)  * $r.cr)
-        + (if ($u.cache_creation // null) != null
-             then (($u.cache_creation.ephemeral_5m_input_tokens // 0) * $r.cw5)
-                + (($u.cache_creation.ephemeral_1h_input_tokens // 0) * $r.cw1h)
-             else (($u.cache_creation_input_tokens // 0) * $r.cw5)
-           end)) / 1000000
-    ' "${jsonl_files[@]}" 2>/dev/null || true) \
-      | awk 'BEGIN{s=0} {s+=$1} END{printf "%.4f", s+0}' || true)
-    [[ -n "$computed" ]] && daily_cost_usd="$computed"
+  if [[ "$recompute_ok" == "true" ]]; then
+    mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+    printf '%s\n%s\n%s\n' "$daily_cost_usd" "$(date +%s)" "$today_local" \
+      > "$daily_cache_file" 2>/dev/null || true
   fi
-  mkdir -p "$INSTALL_DIR" 2>/dev/null || true
-  printf '%s\n%s\n%s\n' "$daily_cost_usd" "$(date +%s)" "$today_local" \
-    > "$daily_cache_file" 2>/dev/null || true
 fi
 
 # --- Helper: format cost with color ---
