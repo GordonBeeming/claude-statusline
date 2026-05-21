@@ -7,20 +7,6 @@ REPO_URL="https://raw.githubusercontent.com/gordonbeeming/claude-statusline/main
 echo "=== Claude Statusline Installer ==="
 echo ""
 
-# --- Install/upgrade goccc ---
-echo "Installing/upgrading goccc..."
-if command -v brew &>/dev/null; then
-  if brew list backstabslash/tap/goccc &>/dev/null; then
-    brew upgrade backstabslash/tap/goccc 2>/dev/null || echo "  goccc is already up to date."
-  else
-    brew install backstabslash/tap/goccc
-  fi
-else
-  echo "  Homebrew not found. Please install goccc manually:"
-  echo "  https://github.com/backstabslash/goccc"
-fi
-echo ""
-
 # --- Install statusline.sh ---
 echo "Installing statusline.sh to ${INSTALL_DIR}..."
 mkdir -p "$INSTALL_DIR"

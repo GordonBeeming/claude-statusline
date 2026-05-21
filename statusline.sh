@@ -60,15 +60,125 @@ eval "$(echo "$stdin_data" | jq -r '
   @sh "thinking_enabled=\(.thinking.enabled // false)"
 ' 2>/dev/null || echo 'cwd=""; model_name=""; model_id=""; session_cost_usd=0; duration_ms=0; ctx_pct=0; ctx_size=0; total_input=0; total_output=0; five_hour_pct=""; five_hour_resets=""; effort_level=""; thinking_enabled=false')"
 
-# --- Get currency and daily cost from goccc ---
-currency_symbol="$"
+# --- Currency, FX rate, and daily cost (self-contained — no external CLI) ---
+# Currency picked via STATUSLINE_CURRENCY (default AUD). USD short-circuits the
+# network entirely so $-only users incur zero overhead.
+currency_code="${STATUSLINE_CURRENCY:-AUD}"
+currency_code=$(printf '%s' "$currency_code" | tr '[:lower:]' '[:upper:]')
+
+case "$currency_code" in
+  USD) currency_symbol='$'   ;;
+  AUD) currency_symbol='A$'  ;;
+  GBP) currency_symbol='£'   ;;
+  EUR) currency_symbol='€'   ;;
+  NZD) currency_symbol='NZ$' ;;
+  CAD) currency_symbol='C$'  ;;
+  JPY) currency_symbol='¥'   ;;
+  *)   currency_symbol="${currency_code} " ;;
+esac
+
 currency_rate=1
-daily_cost=0
-if command -v goccc &>/dev/null; then
-  goccc_json=$(goccc -days 1 -json 2>/dev/null || echo '{}')
-  currency_symbol=$(echo "$goccc_json" | jq -r '.currency.symbol // "$"' 2>/dev/null || echo '$')
-  currency_rate=$(echo "$goccc_json" | jq -r '.currency.rate // 1' 2>/dev/null || echo 1)
-  daily_cost=$(echo "$goccc_json" | jq -r '.summary.total_cost // 0' 2>/dev/null || echo 0)
+
+# FX cache: ${INSTALL_DIR}/.fx-cache-<CCY> — first line is the rate, second
+# line is the unix epoch when it was fetched. Refreshed at most every 24h; on
+# fetch failure we keep using the stale value rather than spam the source.
+fx_cache_file="${INSTALL_DIR}/.fx-cache-${currency_code}"
+if [[ "$currency_code" != "USD" ]]; then
+  fx_now=$(date +%s)
+  fx_rate=""
+  fx_ts=0
+  if [[ -f "$fx_cache_file" ]]; then
+    fx_rate=$(sed -n '1p' "$fx_cache_file" 2>/dev/null || echo "")
+    fx_ts=$(sed -n '2p' "$fx_cache_file" 2>/dev/null || echo 0)
+    [[ -z "$fx_ts" ]] && fx_ts=0
+  fi
+  fx_age=$(( fx_now - fx_ts ))
+  if [[ -z "$fx_rate" || "$fx_age" -ge 86400 ]]; then
+    fetched=$(curl -sSL --connect-timeout 2 --max-time 3 \
+      "https://open.er-api.com/v6/latest/USD" 2>/dev/null \
+      | jq -r --arg c "$currency_code" '.rates[$c] // empty' 2>/dev/null || true)
+    if [[ -n "$fetched" && "$fetched" != "null" ]]; then
+      mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+      printf '%s\n%s\n' "$fetched" "$fx_now" > "$fx_cache_file" 2>/dev/null || true
+      fx_rate="$fetched"
+    fi
+  fi
+  if [[ -n "$fx_rate" && "$fx_rate" != "null" ]]; then
+    currency_rate="$fx_rate"
+  else
+    # No rate available (no cache + no network) — degrade to USD silently.
+    currency_symbol='$'
+  fi
+fi
+
+# Daily cost: today's USD spend across every project, derived from
+# ~/.claude/projects/*/*.jsonl. Cached for 60s so the statusline isn't
+# repeatedly scanning the transcript tree at typing speed. Cache busts on
+# local date rollover.
+daily_cost_usd=0
+daily_cache_file="${INSTALL_DIR}/.daily-cost-cache"
+today_local=$(date '+%Y-%m-%d')
+need_recompute=true
+if [[ -f "$daily_cache_file" ]]; then
+  c_total=$(sed -n '1p' "$daily_cache_file" 2>/dev/null || echo "")
+  c_ts=$(sed -n '2p' "$daily_cache_file" 2>/dev/null || echo 0)
+  c_day=$(sed -n '3p' "$daily_cache_file" 2>/dev/null || echo "")
+  [[ -z "$c_ts" ]] && c_ts=0
+  if [[ "$c_day" == "$today_local" && $(( $(date +%s) - c_ts )) -lt 60 && -n "$c_total" ]]; then
+    daily_cost_usd="$c_total"
+    need_recompute=false
+  fi
+fi
+if [[ "$need_recompute" == "true" ]]; then
+  # Local-day window expressed as UTC epoch bounds. BSD `date` syntax — this
+  # repo is macOS-only (the installer uses Homebrew).
+  day_lo=$(date -j -f '%Y-%m-%d %H:%M:%S' "${today_local} 00:00:00" '+%s' 2>/dev/null || echo 0)
+  day_hi=$(( day_lo + 86400 ))
+  projects_dir="${HOME}/.claude/projects"
+  jsonl_files=()
+  if [[ -d "$projects_dir" ]]; then
+    # 26h window of mtimes catches anything that could still be writing
+    # records inside today's local-time window.
+    while IFS= read -r f; do
+      [[ -n "$f" ]] && jsonl_files+=("$f")
+    done < <(find "$projects_dir" -type f -name '*.jsonl' -mmin -1560 2>/dev/null)
+  fi
+  if (( ${#jsonl_files[@]} > 0 )); then
+    # Pricing table — USD per 1M tokens. Source: https://www.anthropic.com/pricing
+    # Buckets keyed by model family substring; 1h cache-write is 2x the 5m
+    # rate per Anthropic's published rates. Legacy haiku-3 (non-3-5) gets its
+    # own branch since its rates are an order of magnitude lower than haiku-4.
+    # Unknown models contribute 0 so a new release doesn't silently inflate
+    # the total — update this table when new pricing lands.
+    computed=$(jq -r --argjson lo "$day_lo" --argjson hi "$day_hi" '
+      def model_rate($m):
+        ($m | ascii_downcase) as $lm
+        | if   ($lm | test("opus"))           then {i:15,   o:75,   cw5:18.75, cw1h:30,   cr:1.50}
+          elif ($lm | test("sonnet"))         then {i:3,    o:15,   cw5:3.75,  cw1h:6,    cr:0.30}
+          elif ($lm | test("haiku-3-[^5]"))   then {i:0.25, o:1.25, cw5:0.30,  cw1h:0.60, cr:0.03}
+          elif ($lm | test("haiku"))          then {i:1,    o:5,    cw5:1.25,  cw1h:2.50, cr:0.10}
+          else null end;
+      select(.timestamp != null and (.message.usage // null) != null and (.message.model // null) != null)
+      | (((.timestamp[0:19] + "Z") | fromdateiso8601?) // 0) as $ts
+      | select($ts >= $lo and $ts < $hi)
+      | model_rate(.message.model) as $r
+      | select($r != null)
+      | .message.usage as $u
+      | ((($u.input_tokens // 0)              * $r.i)
+        + (($u.output_tokens // 0)            * $r.o)
+        + (($u.cache_read_input_tokens // 0)  * $r.cr)
+        + (if ($u.cache_creation // null) != null
+             then (($u.cache_creation.ephemeral_5m_input_tokens // 0) * $r.cw5)
+                + (($u.cache_creation.ephemeral_1h_input_tokens // 0) * $r.cw1h)
+             else (($u.cache_creation_input_tokens // 0) * $r.cw5)
+           end)) / 1000000
+    ' "${jsonl_files[@]}" 2>/dev/null \
+      | awk 'BEGIN{s=0} {s+=$1} END{printf "%.4f", s+0}')
+    [[ -n "$computed" ]] && daily_cost_usd="$computed"
+  fi
+  mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+  printf '%s\n%s\n%s\n' "$daily_cost_usd" "$(date +%s)" "$today_local" \
+    > "$daily_cache_file" 2>/dev/null || true
 fi
 
 # --- Helper: format cost with color ---
@@ -244,10 +354,10 @@ if [[ "$session_cost_usd" != "0" && "$session_cost_usd" != "null" ]]; then
   session_cost_local="💸 $(format_cost "$session_cost_val") session"
 fi
 
-# --- Daily cost ---
+# --- Daily cost (convert USD to local currency) ---
 daily_cost_display=""
-if [[ "$daily_cost" != "0" && "$daily_cost" != "null" ]]; then
-  daily_cost_val=$(echo "$daily_cost $currency_rate" | awk '{printf "%.2f", $1 * $2}')
+if [[ -n "$daily_cost_usd" && "$daily_cost_usd" != "0" && "$daily_cost_usd" != "0.0000" && "$daily_cost_usd" != "null" ]]; then
+  daily_cost_val=$(echo "$daily_cost_usd $currency_rate" | awk '{printf "%.2f", $1 * $2}')
   daily_cost_display="💰 $(format_cost "$daily_cost_val" daily) today"
 fi
 
