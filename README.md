@@ -17,10 +17,10 @@ An enhanced multi-line status line for [Claude Code](https://claude.com/claude-c
 ## Status Line Example
 
 ```
-📂 claude-statusline · 🤖 Opus 4.7 (1M context) · ⚡ high · 🤔
-🌿 gb/remove-goccc-dep
-💸 A$11.54 session · 💰 A$133.19 today · ⏱️ ███░░░░░░░ 2% 0h41m left
-💭 ██░░░░░░░░ 19% ctx · 🧠 192k in / 1k out
+📂 my-app · 🤖 Opus 4.7 (1M context) · ⚡ high · 🤔
+🌿 gb/dark-mode, gb/billing-fixes, gb/onboarding-copy + 2 more
+💸 A$3.14 session · 💰 A$72.50 today · ⏱️ ████░░░░░░ 42% 2h15m left
+💭 ███░░░░░░░ 31% ctx · 🧠 89k in / 14k out
 ```
 
 Each line groups related information:
