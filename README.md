@@ -17,17 +17,17 @@ An enhanced multi-line status line for [Claude Code](https://claude.com/claude-c
 ## Status Line Example
 
 ```
-📂 xylem · 🤖 Opus 4.7 · ⚡ high · 🤔
-🌿 gb/feature-a, gb/feature-b, gb/feature-c + 2 more
-💸 A$1.21 session · 💰 A$48.00 today · ⏱️ ██░░░░░░░░ 23% 4h0m left
-💭 █░░░░░░░░░ 11% ctx · 🧠 45k in / 12k out
+📂 claude-statusline · 🤖 Opus 4.7 (1M context) · ⚡ high · 🤔
+🌿 gb/remove-goccc-dep
+💸 A$11.54 session · 💰 A$133.19 today · ⏱️ ███░░░░░░░ 2% 0h41m left
+💭 ██░░░░░░░░ 19% ctx · 🧠 192k in / 1k out
 ```
 
 Each line groups related information:
 
 | Line | Purpose | Contents |
 |------|---------|----------|
-| 1 | **Identity + Model** | 📂 Repo name · 🤖 Model · ⚡ Effort · 🤔 Thinking flag |
+| 1 | **Identity + Model** | 📂 Repo name · 🤖 Model (with context variant in parens, e.g. `(1M context)`, when Claude Code reports one) · ⚡ Effort · 🤔 Thinking flag |
 | 2 | **Branches** | 🌿/🔀 Branch (or as many GitButler branches as fit + `+ N more`) |
 | 3 | **Spend & limits** | 💸 Session cost · 💰 Daily cost · ⏱️ Rate limit bar |
 | 4 | **Technical** | 💭 Context usage bar · 🧠 Token counts |
