@@ -172,33 +172,43 @@ if [[ "$need_recompute" == "true" ]]; then
     fi
     if (( ${#jsonl_files[@]} > 0 )); then
       # Pricing table — USD per 1M tokens. Source: https://www.anthropic.com/pricing
-      # Buckets keyed by model family substring; 1h cache-write is 2x the 5m
-      # rate per Anthropic's published rates. Legacy Claude 3 Haiku (e.g.
-      # `claude-3-haiku-20240307`) gets its own branch — its rates are an
-      # order of magnitude lower than 3.5/4-family Haiku. The 3.5 case is
-      # matched *before* the legacy case so model IDs like
-      # `claude-3-5-haiku-20241022` don't fall into the cheaper bucket.
-      # Unknown models contribute 0 so a new release doesn't silently
-      # inflate the total — update this table when new pricing lands.
+      # Opus 4.5+ is priced 1/3 of older Opus (4.1, 3) — Anthropic dropped the
+      # rate for the newer models. The newer branch must be matched *before* the
+      # generic `opus` fallback so it wins for `claude-opus-4-7-…` etc. Haiku
+      # 4.x is its own bucket ($1/$5 with 1h cache write $2 — note 2x not 2.5x).
+      # Haiku 3.5 is matched before legacy Haiku 3 so `claude-3-5-haiku-…`
+      # doesn't fall into the cheaper bucket. Unknown models contribute 0 so a
+      # new release doesn't silently inflate the total — update this table when
+      # new pricing lands.
       # Disable `pipefail` while running the pipeline so a half-written
       # `.jsonl` line aborting jq doesn't kill the script. We capture
       # jq's exit code via PIPESTATUS and only treat the result as a
       # successful recompute when jq itself returned 0.
       set +o pipefail
-      jq_raw=$(jq -r --argjson lo "$day_lo" --argjson hi "$day_hi" '
+      # Dedupe by message.id|requestId — Claude Code transcripts re-emit the
+      # same usage record multiple times (streaming progress events, session
+      # resume rewrites). Without dedup the same tokens get billed N times,
+      # inflating the daily total by 2–5x vs. tools like ccusage/goccc.
+      jq_raw=$(jq -n -r --argjson lo "$day_lo" --argjson hi "$day_hi" '
         def model_rate($m):
           ($m | ascii_downcase) as $lm
-          | if   ($lm | test("opus"))                  then {i:15,   o:75,   cw5:18.75, cw1h:30,   cr:1.50}
-            elif ($lm | test("sonnet"))                then {i:3,    o:15,   cw5:3.75,  cw1h:6,    cr:0.30}
-            elif ($lm | test("3-5-haiku|haiku-3-5"))   then {i:1,    o:5,    cw5:1.25,  cw1h:2.50, cr:0.10}
-            elif ($lm | test("3-haiku|haiku-3"))       then {i:0.25, o:1.25, cw5:0.30,  cw1h:0.60, cr:0.03}
-            elif ($lm | test("haiku"))                 then {i:1,    o:5,    cw5:1.25,  cw1h:2.50, cr:0.10}
+          | if   ($lm | test("opus-4-[5-9]|opus-[5-9]"))   then {i:5,    o:25,   cw5:6.25,   cw1h:10,    cr:0.50}
+            elif ($lm | test("opus"))                      then {i:15,   o:75,   cw5:18.75,  cw1h:30,    cr:1.50}
+            elif ($lm | test("sonnet"))                    then {i:3,    o:15,   cw5:3.75,   cw1h:6,     cr:0.30}
+            elif ($lm | test("haiku-4|haiku-[5-9]"))       then {i:1,    o:5,    cw5:1.25,   cw1h:2,     cr:0.10}
+            elif ($lm | test("3-5-haiku|haiku-3-5"))       then {i:0.80, o:4,    cw5:1,      cw1h:1.60,  cr:0.08}
+            elif ($lm | test("3-haiku|haiku-3"))           then {i:0.25, o:1.25, cw5:0.3125, cw1h:0.50,  cr:0.025}
+            elif ($lm | test("haiku"))                     then {i:1,    o:5,    cw5:1.25,   cw1h:2,     cr:0.10}
             else null end;
-        select(.timestamp != null and (.message.usage // null) != null and (.message.model // null) != null)
-        | (((.timestamp[0:19] + "Z") | fromdateiso8601?) // 0) as $ts
-        | select($ts >= $lo and $ts < $hi)
+        [ inputs
+          | select(.timestamp != null and (.message.usage // null) != null and (.message.model // null) != null)
+          | (((.timestamp[0:19] + "Z") | fromdateiso8601?) // 0) as $ts
+          | select($ts >= $lo and $ts < $hi)
+          | select(model_rate(.message.model) != null)
+        ]
+        | unique_by((.message.id // "") + "|" + (.requestId // ""))
+        | .[]
         | model_rate(.message.model) as $r
-        | select($r != null)
         | .message.usage as $u
         | ((($u.input_tokens // 0)              * $r.i)
           + (($u.output_tokens // 0)            * $r.o)
