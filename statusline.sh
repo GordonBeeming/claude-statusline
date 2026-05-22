@@ -180,15 +180,19 @@ if [[ "$need_recompute" == "true" ]]; then
       # doesn't fall into the cheaper bucket. Unknown models contribute 0 so a
       # new release doesn't silently inflate the total — update this table when
       # new pricing lands.
-      # Disable `pipefail` while running the pipeline so a half-written
-      # `.jsonl` line aborting jq doesn't kill the script. We capture
-      # jq's exit code via PIPESTATUS and only treat the result as a
-      # successful recompute when jq itself returned 0.
-      set +o pipefail
       # Dedupe by message.id|requestId — Claude Code transcripts re-emit the
       # same usage record multiple times (streaming progress events, session
       # resume rewrites). Without dedup the same tokens get billed N times,
       # inflating the daily total by 2–5x vs. tools like ccusage/goccc.
+      # Records missing both IDs are passed through un-deduped so they aren't
+      # collapsed into a single bucket (which would under-count).
+      #
+      # The `|| jq_exit=$?` is load-bearing: under `set -e` a non-zero exit
+      # from the command substitution would otherwise abort the script before
+      # we get a chance to handle the failure. With the `|| ...` guard the
+      # exit code is captured and the next block falls back to the cached
+      # value instead of crashing the render.
+      jq_exit=0
       jq_raw=$(jq -n -r --argjson lo "$day_lo" --argjson hi "$day_hi" '
         def model_rate($m):
           ($m | ascii_downcase) as $lm
@@ -206,7 +210,9 @@ if [[ "$need_recompute" == "true" ]]; then
           | select($ts >= $lo and $ts < $hi)
           | select(model_rate(.message.model) != null)
         ]
-        | unique_by((.message.id // "") + "|" + (.requestId // ""))
+        | (map(select((.message.id // "") != "" or (.requestId // "") != ""))
+            | unique_by((.message.id // "") + "|" + (.requestId // "")))
+          + map(select((.message.id // "") == "" and (.requestId // "") == ""))
         | .[]
         | model_rate(.message.model) as $r
         | .message.usage as $u
@@ -218,9 +224,7 @@ if [[ "$need_recompute" == "true" ]]; then
                   + (($u.cache_creation.ephemeral_1h_input_tokens // 0) * $r.cw1h)
                else (($u.cache_creation_input_tokens // 0) * $r.cw5)
              end)) / 1000000
-      ' "${jsonl_files[@]}" 2>/dev/null)
-      jq_exit=$?
-      set -o pipefail
+      ' "${jsonl_files[@]}" 2>/dev/null) || jq_exit=$?
       if [[ "$jq_exit" -eq 0 ]]; then
         daily_cost_usd=$(printf '%s\n' "$jq_raw" | awk 'BEGIN{s=0} {s+=$1} END{printf "%.4f", s+0}')
         recompute_ok=true
