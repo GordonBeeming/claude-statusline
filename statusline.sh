@@ -172,6 +172,12 @@ if [[ "$need_recompute" == "true" ]]; then
     fi
     if (( ${#jsonl_files[@]} > 0 )); then
       # Pricing table — USD per 1M tokens. Source: https://www.anthropic.com/pricing
+      # Fable 5 ($10/$50) is the tier above Opus. Its id has no `opus` substring
+      # so ordering vs. the opus branches doesn't matter for correctness, but it
+      # sits first so the most-expensive tier is easy to spot. A missing fable
+      # row silently drops every fable record from the daily total via the
+      # `model_rate(...) != null` filter — exactly the bug that under-reported a
+      # heavy Fable 5 day as ~1/4 of the session cost.
       # Opus 4.5+ is priced 1/3 of older Opus (4.1, 3) — Anthropic dropped the
       # rate for the newer models. The newer branch must be matched *before* the
       # generic `opus` fallback so it wins for `claude-opus-4-7-…` etc. Haiku
@@ -196,7 +202,8 @@ if [[ "$need_recompute" == "true" ]]; then
       jq_raw=$(jq -n -r --argjson lo "$day_lo" --argjson hi "$day_hi" '
         def model_rate($m):
           ($m | ascii_downcase) as $lm
-          | if   ($lm | test("opus-4-[5-9]|opus-[5-9]"))   then {i:5,    o:25,   cw5:6.25,   cw1h:10,    cr:0.50}
+          | if   ($lm | test("fable"))                    then {i:10,   o:50,   cw5:12.50,  cw1h:20,    cr:1.00}
+            elif ($lm | test("opus-4-[5-9]|opus-[5-9]"))   then {i:5,    o:25,   cw5:6.25,   cw1h:10,    cr:0.50}
             elif ($lm | test("opus"))                      then {i:15,   o:75,   cw5:18.75,  cw1h:30,    cr:1.50}
             elif ($lm | test("sonnet"))                    then {i:3,    o:15,   cw5:3.75,   cw1h:6,     cr:0.30}
             elif ($lm | test("haiku-4|haiku-[5-9]"))       then {i:1,    o:5,    cw5:1.25,   cw1h:2,     cr:0.10}
