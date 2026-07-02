@@ -187,9 +187,9 @@ if [[ "$need_recompute" == "true" ]]; then
       # rate for the newer models. The newer branch must be matched *before* the
       # generic `opus` fallback so it wins for `claude-opus-4-7-…` etc. Sonnet 5+
       # gets its own branch before the generic `sonnet` fallback because it
-      # launched on introductory pricing ($2/$10) — the `$s5std` gate (computed
-      # from today's date) swaps to the standard $3/$15 at the 2026-09-01
-      # cutover, while Sonnet 4.6 and earlier stay $3/$15 throughout. Haiku
+      # launched on introductory pricing ($2/$10) — a date gate (bash `s5_std`,
+      # passed into jq as `$s5std`) swaps to the standard $3/$15 at the
+      # 2026-09-01 cutover, while Sonnet 4.6 and earlier stay $3/$15 throughout. Haiku
       # 4.x is its own bucket ($1/$5 with 1h cache write $2 — note 2x not 2.5x).
       # Haiku 3.5 is matched before legacy Haiku 3 so `claude-3-5-haiku-…`
       # doesn't fall into the cheaper bucket. Any model with no row here returns
@@ -415,9 +415,13 @@ if command -v shunt-dev &>/dev/null && [[ -n "$cwd" ]]; then
   shunt_info=""
   # cwd is the cache key: `shunt-dev active` resolves both the project and which
   # siding we're in from the working directory, so two worktrees of the same
-  # project must not share an entry. cksum gives a filename-safe numeric digest.
-  cwd_hash=$(printf '%s' "$cwd" | cksum 2>/dev/null | cut -d' ' -f1)
-  [[ "$cwd_hash" =~ ^[0-9]+$ ]] || cwd_hash="default"
+  # project must not share an entry. cksum's CRC + byte-count (joined with a
+  # dash to stay filename-safe) is the digest; folding in the length shrinks
+  # the collision risk of the CRC alone. The `|| true` keeps a missing/failed
+  # cksum from aborting the render under `set -e` — an empty hash just falls
+  # back to "default" below.
+  cwd_hash=$(printf '%s' "$cwd" | cksum 2>/dev/null | awk '{print $1 "-" $2}' || true)
+  [[ "$cwd_hash" =~ ^[0-9]+-[0-9]+$ ]] || cwd_hash="default"
   shunt_cache_file="${INSTALL_DIR}/.shunt-cache-${cwd_hash}"
   shunt_cache_hit=false
   if [[ -f "$shunt_cache_file" ]]; then
