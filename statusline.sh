@@ -161,6 +161,11 @@ if [[ "$need_recompute" == "true" ]]; then
   recompute_ok=false
   if [[ -n "$day_lo" ]]; then
     day_hi=$(( day_lo + 86400 ))
+    # Sonnet 5 launched on introductory pricing ($2/$10) that reverts to the
+    # standard $3/$15 on 2026-09-01. Gate on today's local date (ISO strings
+    # compare lexicographically) so the table self-corrects at the cutover
+    # without a manual edit — "2026-08-31" is the last introductory day.
+    if [[ "$today_local" > "2026-08-31" ]]; then s5_std=true; else s5_std=false; fi
     projects_dir="${HOME}/.claude/projects"
     jsonl_files=()
     if [[ -d "$projects_dir" ]]; then
@@ -180,7 +185,11 @@ if [[ "$need_recompute" == "true" ]]; then
       # spot.
       # Opus 4.5+ is priced 1/3 of older Opus (4.1, 3) — Anthropic dropped the
       # rate for the newer models. The newer branch must be matched *before* the
-      # generic `opus` fallback so it wins for `claude-opus-4-7-…` etc. Haiku
+      # generic `opus` fallback so it wins for `claude-opus-4-7-…` etc. Sonnet 5+
+      # gets its own branch before the generic `sonnet` fallback because it
+      # launched on introductory pricing ($2/$10) — the `$s5std` gate (computed
+      # from today's date) swaps to the standard $3/$15 at the 2026-09-01
+      # cutover, while Sonnet 4.6 and earlier stay $3/$15 throughout. Haiku
       # 4.x is its own bucket ($1/$5 with 1h cache write $2 — note 2x not 2.5x).
       # Haiku 3.5 is matched before legacy Haiku 3 so `claude-3-5-haiku-…`
       # doesn't fall into the cheaper bucket. Any model with no row here returns
@@ -201,12 +210,14 @@ if [[ "$need_recompute" == "true" ]]; then
       # exit code is captured and the next block falls back to the cached
       # value instead of crashing the render.
       jq_exit=0
-      jq_raw=$(jq -n -r --argjson lo "$day_lo" --argjson hi "$day_hi" '
+      jq_raw=$(jq -n -r --argjson lo "$day_lo" --argjson hi "$day_hi" --argjson s5std "$s5_std" '
         def model_rate($m):
           ($m | ascii_downcase) as $lm
           | if   ($lm | test("fable|mythos"))             then {i:10,   o:50,   cw5:12.50,  cw1h:20,    cr:1.00}
             elif ($lm | test("opus-4-[5-9]|opus-[5-9]"))   then {i:5,    o:25,   cw5:6.25,   cw1h:10,    cr:0.50}
             elif ($lm | test("opus"))                      then {i:15,   o:75,   cw5:18.75,  cw1h:30,    cr:1.50}
+            elif ($lm | test("sonnet-5|sonnet-[6-9]"))     then (if $s5std then {i:3, o:15, cw5:3.75, cw1h:6, cr:0.30}
+                                                                          else {i:2, o:10, cw5:2.50, cw1h:4, cr:0.20} end)
             elif ($lm | test("sonnet"))                    then {i:3,    o:15,   cw5:3.75,   cw1h:6,     cr:0.30}
             elif ($lm | test("haiku-4|haiku-[5-9]"))       then {i:1,    o:5,    cw5:1.25,   cw1h:2,     cr:0.10}
             elif ($lm | test("3-5-haiku|haiku-3-5"))       then {i:0.80, o:4,    cw5:1,      cw1h:1.60,  cr:0.08}
@@ -393,6 +404,68 @@ elif [[ -n "$current_branch" ]]; then
   branch_info="🔀 ${truncated_branch}"
 fi
 
+# --- Shunt sidings (its own line, directly below the branch line) ---
+# Resolving sidings shells out to `shunt-dev active --json` (~0.15s) — too slow
+# to run on every render — so the result is cached per-cwd for 30s. Repos that
+# aren't shunt apps cache an empty result too, so the common (non-shunt) case
+# pays that cost at most once per 30s instead of on every keystroke.
+shunt_line=""
+if command -v shunt-dev &>/dev/null && [[ -n "$cwd" ]]; then
+  shunt_now=$(date +%s)
+  shunt_info=""
+  # cwd is the cache key: `shunt-dev active` resolves both the project and which
+  # siding we're in from the working directory, so two worktrees of the same
+  # project must not share an entry. cksum gives a filename-safe numeric digest.
+  cwd_hash=$(printf '%s' "$cwd" | cksum 2>/dev/null | cut -d' ' -f1)
+  [[ "$cwd_hash" =~ ^[0-9]+$ ]] || cwd_hash="default"
+  shunt_cache_file="${INSTALL_DIR}/.shunt-cache-${cwd_hash}"
+  shunt_cache_hit=false
+  if [[ -f "$shunt_cache_file" ]]; then
+    shunt_ts=$(sed -n '2p' "$shunt_cache_file" 2>/dev/null || echo 0)
+    [[ "$shunt_ts" =~ ^[0-9]+$ ]] || shunt_ts=0
+    if (( shunt_now - shunt_ts < 30 )); then
+      # Line 1 holds the display payload, which is legitimately empty when the
+      # repo isn't a shunt app — read it verbatim so an empty value still counts
+      # as a hit and suppresses the reshell for the full TTL.
+      shunt_info=$(sed -n '1p' "$shunt_cache_file" 2>/dev/null || echo "")
+      shunt_cache_hit=true
+    fi
+  fi
+  if [[ "$shunt_cache_hit" != "true" ]]; then
+    # `active` exits non-zero for non-shunt dirs but still prints its JSON, so
+    # `|| true` keeps `set -e` happy while we let jq's .active gate decide.
+    shunt_json=$(cd "$cwd" 2>/dev/null && shunt-dev active --json 2>/dev/null || true)
+    if [[ -n "$shunt_json" ]]; then
+      # One siding per line as "<flag>\t<name>", excluding `host` (the run-local
+      # pseudo-entry, not a real siding). flag=1 marks the siding whose worktree
+      # contains the current cwd — the one this session is editing — which awk
+      # then decorates with a ★.
+      shunt_info=$(printf '%s' "$shunt_json" | jq -r --arg cwd "$cwd" '
+        select(.active == true)
+        | [ .sidings[] | select(.name != "host") ]
+        | sort_by(.name)
+        | .[]
+        | .src as $src
+        | (if $cwd == $src or ($cwd | startswith($src + "/")) then "1" else "0" end)
+          + "\t" + .name
+      ' 2>/dev/null \
+        | awk -F'\t' '
+            { name=$2; if ($1=="1") name=name" ★"
+              out = (out=="" ? name : out ", " name) }
+            END { if (out!="") print out }' \
+        || true)
+    fi
+    mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+    printf '%s\n%s\n' "$shunt_info" "$shunt_now" > "$shunt_cache_file" 2>/dev/null || true
+  fi
+  if [[ -n "$shunt_info" ]]; then
+    if (( ${#shunt_info} > branch_line_budget )); then
+      shunt_info="${shunt_info:0:$((branch_line_budget - 1))}…"
+    fi
+    shunt_line="🚂 ${shunt_info}"
+  fi
+fi
+
 # --- Model display ---
 model_display=""
 if [[ -n "$model_name" ]]; then
@@ -494,6 +567,10 @@ fi
 line2_parts=()
 [[ -n "$branch_info" ]] && line2_parts+=("$branch_info")
 
+# Line 2b: Shunt sidings (alone, directly below the branch line)
+line_shunt_parts=()
+[[ -n "$shunt_line" ]] && line_shunt_parts+=("$shunt_line")
+
 # Line 3: Spend & limits — session cost, daily cost, rate limit
 line3_parts=()
 [[ -n "$session_cost_local" ]] && line3_parts+=("$session_cost_local")
@@ -526,6 +603,10 @@ fi
 if (( ${#line2_parts[@]} > 0 )); then
   [[ -n "$output" ]] && output+=$'\n'
   output+=$(join_parts "${line2_parts[@]}")
+fi
+if (( ${#line_shunt_parts[@]} > 0 )); then
+  [[ -n "$output" ]] && output+=$'\n'
+  output+=$(join_parts "${line_shunt_parts[@]}")
 fi
 if (( ${#line3_parts[@]} > 0 )); then
   [[ -n "$output" ]] && output+=$'\n'
