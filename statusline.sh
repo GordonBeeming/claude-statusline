@@ -5,6 +5,11 @@ INSTALL_DIR="${HOME}/.claude/scripts"
 INSTALLED_SCRIPT="${INSTALL_DIR}/statusline.sh"
 UPDATE_MARKER="${INSTALL_DIR}/.statusline-last-update"
 REPO_URL="https://raw.githubusercontent.com/gordonbeeming/claude-statusline/main/statusline.sh"
+# The subagent statusline ships from the same repo and rides this script's
+# once-a-day update so it never goes stale after install, without paying its own
+# network cost (it runs on every agent-panel tick and must stay fast).
+SUBAGENT_INSTALLED="${INSTALL_DIR}/subagent-statusline.sh"
+SUBAGENT_REPO_URL="https://raw.githubusercontent.com/gordonbeeming/claude-statusline/main/subagent-statusline.sh"
 
 # ANSI colors
 RED='\033[31m'
@@ -24,14 +29,21 @@ auto_update() {
   local age=$(( now - last_update ))
   if (( age >= 86400 )); then
     (
-      tmp=$(mktemp)
-      if curl -sSL --max-time 5 "$REPO_URL" -o "$tmp" 2>/dev/null; then
-        if [[ -s "$tmp" ]] && head -1 "$tmp" | grep -q '^#!/'; then
-          cp "$tmp" "$INSTALLED_SCRIPT"
-          chmod +x "$INSTALLED_SCRIPT"
+      # Refresh both scripts from main. Each is validated (non-empty + shebang)
+      # before it replaces the installed copy, so a truncated download can't
+      # clobber a working script.
+      for pair in "${REPO_URL}::${INSTALLED_SCRIPT}" "${SUBAGENT_REPO_URL}::${SUBAGENT_INSTALLED}"; do
+        url="${pair%%::*}"
+        dest="${pair##*::}"
+        tmp=$(mktemp)
+        if curl -sSL --max-time 5 "$url" -o "$tmp" 2>/dev/null; then
+          if [[ -s "$tmp" ]] && head -1 "$tmp" | grep -q '^#!/'; then
+            cp "$tmp" "$dest"
+            chmod +x "$dest"
+          fi
         fi
-      fi
-      rm -f "$tmp"
+        rm -f "$tmp"
+      done
       echo "$now" > "$UPDATE_MARKER"
     ) &>/dev/null &
     disown 2>/dev/null || true

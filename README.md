@@ -12,6 +12,7 @@ An enhanced multi-line status line for [Claude Code](https://claude.com/claude-c
 - Rate limit progress bar (5-hour window with time remaining, color-coded green/yellow/red)
 - Falls back to session duration display when rate limit data isn't available
 - Context window progress bar and token usage display
+- Subagent rows: shows each running teammate's model in the agent panel (via `subagentStatusLine`)
 - Auto-updates from `main` once per day
 
 ## Status Line Example
@@ -52,6 +53,39 @@ The branches line uses the full terminal width: it shows as many full branch nam
 
 Progress bars are color-coded: green (<70%), yellow (70-89%), red (90%+).
 
+## Subagent rows
+
+When you run background teammates or subagents, Claude Code draws one row per teammate in the agent panel below the prompt. The default row is `name · description · token count`, which never tells you which model a teammate is on: a Sonnet teammate looks identical to an Opus one. This project ships a second script, `subagent-statusline.sh`, that rewrites those rows to put the model front and centre:
+
+```
+↳ 🐝 pr-pilot · 🔮 Sonnet 5 · ↓ 81.8k tok
+↳ 🐝 explorer · 🍃 Haiku 4.5 · ↓ 12.1k tok
+```
+
+- `↳ 🐝` marks a spawned worker nested under the main session.
+- The model glyph and name come from the teammate's own transcript, since the panel data doesn't include the model. It fills in as soon as the teammate's first response lands; before that, the row shows without a model.
+- Only **actively-running** teammates appear. Finished and idle rows are hidden, so the panel goes quiet once the work is done.
+
+### Model glyphs
+
+| Glyph | Model family |
+|-------|--------------|
+| 🦉 | Opus |
+| 🔮 | Sonnet |
+| 🍃 | Haiku |
+| 📖 | Fable / Mythos |
+
+A model outside these families keeps its row but drops the glyph and name.
+
+To enable it, add `subagentStatusLine` alongside `statusLine` in `~/.claude/settings.json`:
+
+```json
+"subagentStatusLine": {
+  "type": "command",
+  "command": "~/.claude/scripts/subagent-statusline.sh"
+}
+```
+
 ## Install
 
 ```bash
@@ -59,7 +93,7 @@ curl -sSL https://raw.githubusercontent.com/gordonbeeming/claude-statusline/main
 ```
 
 This will:
-1. Copy `statusline.sh` to `~/.claude/scripts/`
+1. Copy `statusline.sh` and `subagent-statusline.sh` to `~/.claude/scripts/`
 2. Print instructions for updating your `~/.claude/settings.json`
 
 After running the installer, add this to your `~/.claude/settings.json`:
@@ -68,8 +102,14 @@ After running the installer, add this to your `~/.claude/settings.json`:
 "statusLine": {
   "type": "command",
   "command": "~/.claude/scripts/statusline.sh"
+},
+"subagentStatusLine": {
+  "type": "command",
+  "command": "~/.claude/scripts/subagent-statusline.sh"
 }
 ```
+
+The `subagentStatusLine` line is optional — leave it out if you only want the main status line.
 
 ## Dependencies
 
@@ -88,4 +128,4 @@ Daily cost is computed by scanning `~/.claude/projects/*/*.jsonl` for today's us
 
 ## Auto-Updates
 
-The installed script checks once per day for updates from the `main` branch of this repo. The check runs in the background so it never slows down the status line.
+The installed script checks once per day for updates from the `main` branch of this repo and refreshes both `statusline.sh` and `subagent-statusline.sh`. The check runs in the background so it never slows down the status line.

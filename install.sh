@@ -2,33 +2,40 @@
 set -euo pipefail
 
 INSTALL_DIR="${HOME}/.claude/scripts"
-REPO_URL="https://raw.githubusercontent.com/gordonbeeming/claude-statusline/main/statusline.sh"
+BASE_URL="https://raw.githubusercontent.com/gordonbeeming/claude-statusline/main"
 
 echo "=== Claude Statusline Installer ==="
 echo ""
 
-# --- Install statusline.sh ---
-echo "Installing statusline.sh to ${INSTALL_DIR}..."
 mkdir -p "$INSTALL_DIR"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-tmp=$(mktemp)
-if curl -sSL "$REPO_URL" -o "$tmp"; then
-  cp "$tmp" "${INSTALL_DIR}/statusline.sh"
-  chmod +x "${INSTALL_DIR}/statusline.sh"
-  echo "  Installed successfully."
-else
-  echo "  Failed to download. Falling back to local copy..."
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  if [[ -f "${SCRIPT_DIR}/statusline.sh" ]]; then
-    cp "${SCRIPT_DIR}/statusline.sh" "${INSTALL_DIR}/statusline.sh"
-    chmod +x "${INSTALL_DIR}/statusline.sh"
+# Install a script: download from main, falling back to the local copy beside
+# this installer if the download fails.
+install_script() {
+  local name="$1"
+  echo "Installing ${name} to ${INSTALL_DIR}..."
+  local tmp
+  tmp=$(mktemp)
+  if curl -sSL "${BASE_URL}/${name}" -o "$tmp"; then
+    cp "$tmp" "${INSTALL_DIR}/${name}"
+    chmod +x "${INSTALL_DIR}/${name}"
+    echo "  Installed successfully."
+  elif [[ -f "${SCRIPT_DIR}/${name}" ]]; then
+    echo "  Failed to download. Falling back to local copy..."
+    cp "${SCRIPT_DIR}/${name}" "${INSTALL_DIR}/${name}"
+    chmod +x "${INSTALL_DIR}/${name}"
     echo "  Installed from local copy."
   else
-    echo "  ERROR: No statusline.sh found to install."
+    echo "  ERROR: No ${name} found to install."
+    rm -f "$tmp"
     exit 1
   fi
-fi
-rm -f "$tmp"
+  rm -f "$tmp"
+}
+
+install_script "statusline.sh"
+install_script "subagent-statusline.sh"
 
 # Write initial update marker
 echo "$(date +%s)" > "${INSTALL_DIR}/.statusline-last-update"
@@ -36,11 +43,15 @@ echo "$(date +%s)" > "${INSTALL_DIR}/.statusline-last-update"
 echo ""
 echo "=== Installation complete ==="
 echo ""
-echo "Add this to your ~/.claude/settings.json:"
+echo "Add these to your ~/.claude/settings.json:"
 echo ""
 echo '  "statusLine": {'
 echo '    "type": "command",'
 echo '    "command": "~/.claude/scripts/statusline.sh"'
+echo '  },'
+echo '  "subagentStatusLine": {'
+echo '    "type": "command",'
+echo '    "command": "~/.claude/scripts/subagent-statusline.sh"'
 echo '  }'
 echo ""
-echo "The script will auto-update from main once per day."
+echo "The main script auto-updates from main once per day and refreshes both."
