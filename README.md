@@ -17,6 +17,8 @@ An enhanced multi-line status line for [Claude Code](https://claude.com/claude-c
 
 ## Status Line Example
 
+The main session shows the four-line block:
+
 ```
 📂 my-app · 🤖 Opus 4.7 (1M context) · ⚡ high · 🤔
 🌿 gb/dark-mode, gb/billing-fixes, gb/onboarding-copy + 2 more
@@ -24,7 +26,14 @@ An enhanced multi-line status line for [Claude Code](https://claude.com/claude-c
 💭 ███░░░░░░░ 31% ctx · 🧠 89k in / 14k out
 ```
 
-Each line groups related information:
+When you have teammates running, the agent panel below the prompt adds one row per running teammate (see [Subagent rows](#subagent-rows)):
+
+```
+↳ 🐝 pr-pilot · 🔮 Sonnet 5 · ↓ 81.8k tok
+↳ 🐝 explorer · 🍃 Haiku 4.5 · ↓ 12.1k tok
+```
+
+Each line of the main block groups related information:
 
 | Line | Purpose | Contents |
 |------|---------|----------|
@@ -55,12 +64,7 @@ Progress bars are color-coded: green (<70%), yellow (70-89%), red (90%+).
 
 ## Subagent rows
 
-When you run background teammates or subagents, Claude Code draws one row per teammate in the agent panel below the prompt. The default row is `name · description · token count`, which never tells you which model a teammate is on: a Sonnet teammate looks identical to an Opus one. This project ships a second script, `subagent-statusline.sh`, that rewrites those rows to put the model front and centre:
-
-```
-↳ 🐝 pr-pilot · 🔮 Sonnet 5 · ↓ 81.8k tok
-↳ 🐝 explorer · 🍃 Haiku 4.5 · ↓ 12.1k tok
-```
+When you run background teammates or subagents, Claude Code draws one row per teammate in the agent panel below the prompt. The default row is `name · description · token count`, which never tells you which model a teammate is on: a Sonnet teammate looks identical to an Opus one. This project ships a second script, `subagent-statusline.sh`, that rewrites those rows to put the model front and centre (see the [example above](#status-line-example)):
 
 - `↳ 🐝` marks a spawned worker nested under the main session.
 - The model glyph and name come from the teammate's own transcript, since the panel data doesn't include the model. It fills in as soon as the teammate's first response lands; before that, the row shows without a model.
