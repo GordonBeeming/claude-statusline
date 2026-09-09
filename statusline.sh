@@ -355,6 +355,22 @@ strip_ignored_prefix() {
   printf '%s' "$name"
 }
 
+# --- Helper: make a git path absolute ---
+# `git rev-parse` reports these relative to the directory it was invoked from
+# (the `-C` target), not the checkout root: from a subdirectory of an ordinary
+# repo `--git-common-dir` comes back as `../../.git`. Resolving that against the
+# wrong base, or leaving the `..` segments in, breaks the string compare below.
+absolute_git_path() {
+  local path=$1
+  [[ -z "$path" ]] && return
+  if [[ "$path" == /* ]]; then
+    printf '%s' "$path"
+    return
+  fi
+  # cd + pwd -P canonicalizes without needing realpath, which macOS lacks.
+  ( cd "${cwd:-.}/${path}" 2>/dev/null && pwd -P )
+}
+
 # --- Get repo name and worktree ---
 # One rev-parse yields all three facts: the checkout root, the shared repo
 # directory, and this checkout's own git dir. A linked worktree is exactly the
@@ -382,27 +398,29 @@ fi
 if [[ -n "$toplevel" ]]; then
   repo_name=$(basename "$toplevel")
   in_git_repo=true
-  # `--git-common-dir` can come back relative (plain ".git" in the main
-  # checkout), so resolve it against the checkout root before comparing —
-  # otherwise every main checkout would look like a linked worktree.
-  if [[ -n "$git_common_dir" && "$git_common_dir" != /* ]]; then
-    git_common_dir="${toplevel}/${git_common_dir}"
-  fi
-  if [[ -n "$git_dir" && "$git_dir" != /* ]]; then
-    git_dir="${toplevel}/${git_dir}"
-  fi
-  if [[ -n "$git_common_dir" && -n "$git_dir" && "$git_common_dir" != "$git_dir" ]]; then
-    in_worktree=true
-    worktree_name="$repo_name"
-    # The repo's real name is the main checkout's folder, one level above the
-    # shared .git — without this, line 1 would name the worktree instead and
-    # several concurrent worktrees would be indistinguishable from each other.
-    # Only when the common dir is a conventional ".git" folder — a bare repo's
-    # common dir is the repo itself (…/foo.git), whose parent names the
-    # containing folder rather than the repo, so keep the worktree name there.
-    if [[ "$(basename "$git_common_dir")" == ".git" ]]; then
-      main_name=$(basename "$(dirname "$git_common_dir")")
-      [[ -n "$main_name" && "$main_name" != "." && "$main_name" != "/" ]] && repo_name="$main_name"
+  # An ordinary checkout has a `.git` directory; a linked worktree and a
+  # submodule each have a `.git` *file* pointing at the real git dir. Gating on
+  # that keeps the common case free of path arithmetic entirely, and stops a
+  # relative `--git-common-dir` from making an ordinary repo look like a
+  # worktree when the session starts in a subdirectory.
+  if [[ -f "${toplevel}/.git" ]]; then
+    git_common_dir=$(absolute_git_path "$git_common_dir")
+    git_dir=$(absolute_git_path "$git_dir")
+    # The two are equal in a submodule and differ in a linked worktree, whose
+    # git dir sits under <common>/worktrees/<name>.
+    if [[ -n "$git_common_dir" && -n "$git_dir" && "$git_common_dir" != "$git_dir" ]]; then
+      in_worktree=true
+      worktree_name="$repo_name"
+      # The repo's real name is the main checkout's folder, one level above the
+      # shared .git — without this, line 1 would name the worktree instead and
+      # several concurrent worktrees would be indistinguishable from each other.
+      # Only when the common dir is a conventional ".git" folder — a bare repo's
+      # common dir is the repo itself (…/foo.git), whose parent names the
+      # containing folder rather than the repo, so keep the worktree name there.
+      if [[ "$(basename "$git_common_dir")" == ".git" ]]; then
+        main_name=$(basename "$(dirname "$git_common_dir")")
+        [[ -n "$main_name" && "$main_name" != "." && "$main_name" != "/" ]] && repo_name="$main_name"
+      fi
     fi
   fi
 elif [[ -n "$cwd" ]]; then
