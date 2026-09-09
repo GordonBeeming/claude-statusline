@@ -367,8 +367,11 @@ absolute_git_path() {
     printf '%s' "$path"
     return
   fi
-  # cd + pwd -P canonicalizes without needing realpath, which macOS lacks.
-  ( cd "${cwd:-.}/${path}" 2>/dev/null && pwd -P )
+  # cd + pwd -P canonicalizes without needing realpath, which macOS lacks. The
+  # `|| true` is load-bearing: a failed cd (a stale cwd, a path git spelled in a
+  # way we can't follow) would otherwise take the whole render down with it
+  # under `set -e`. Returning empty instead just leaves worktree detection off.
+  ( cd "${cwd:-.}/${path}" 2>/dev/null && pwd -P ) || true
 }
 
 # --- Get repo name and worktree ---
@@ -473,10 +476,16 @@ if [[ "$in_worktree" == "true" && -n "$worktree_name" ]]; then
   # differences the various tools introduce.
   branch_core=$(normalize_name "$current_branch")
   worktree_core=$(normalize_name "$worktree_name")
+  # Padding both sides with the separator forces the containment test onto
+  # component boundaries. Without it a worktree folder called `fix` folds into a
+  # branch called `prefix-logging`, because the characters happen to appear
+  # inside a longer word, and the folder name disappears from the line.
+  branch_padded="-${branch_core}-"
+  worktree_padded="-${worktree_core}-"
   if [[ -n "$current_branch" && -n "$branch_core" && -n "$worktree_core" \
         && ( "$branch_core" == "$worktree_core" \
-             || "$branch_core" == *"$worktree_core"* \
-             || "$worktree_core" == *"$branch_core"* ) ]]; then
+             || "$branch_padded" == *"-${worktree_core}-"* \
+             || "$worktree_padded" == *"-${branch_core}-"* ) ]]; then
     # The 🌳 alone carries "this is a worktree". Show the branch: it is the name
     # that was chosen for the work, where the folder is whatever the tool that
     # created the worktree was able to spell.
