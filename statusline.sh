@@ -173,11 +173,6 @@ if [[ "$need_recompute" == "true" ]]; then
   recompute_ok=false
   if [[ -n "$day_lo" ]]; then
     day_hi=$(( day_lo + 86400 ))
-    # Sonnet 5 launched on introductory pricing ($2/$10) that reverts to the
-    # standard $3/$15 on 2026-09-01. Gate on today's local date (ISO strings
-    # compare lexicographically) so the table self-corrects at the cutover
-    # without a manual edit — "2026-08-31" is the last introductory day.
-    if [[ "$today_local" > "2026-08-31" ]]; then s5_std=true; else s5_std=false; fi
     projects_dir="${HOME}/.claude/projects"
     jsonl_files=()
     if [[ -d "$projects_dir" ]]; then
@@ -188,20 +183,25 @@ if [[ "$need_recompute" == "true" ]]; then
       done < <(find "$projects_dir" -type f -name '*.jsonl' -mmin -1560 2>/dev/null)
     fi
     if (( ${#jsonl_files[@]} > 0 )); then
-      # Pricing table — USD per 1M tokens. Source: https://www.anthropic.com/pricing
-      # Fable 5 / Mythos 5 ($10/$50) are the top tier, above Opus. Mythos 5
-      # (claude-mythos-5, Project Glasswing limited availability) shares Fable's
-      # rate, so one branch covers both via the `fable|mythos` test. Their ids
-      # have no `opus` substring, so ordering vs. the opus branches doesn't
-      # matter for correctness — they sit first so the priciest tier is easy to
-      # spot.
+      # Pricing table — USD per 1M tokens. Source:
+      # https://platform.claude.com/docs/en/about-claude/pricing
+      # Fable / Mythos ($10/$50) are the top tier, above Opus. Mythos (Project
+      # Glasswing limited availability) shares Fable's rate at every point
+      # version, so each branch covers both. Their ids have no `opus`
+      # substring, so ordering vs. the opus branches doesn't matter for
+      # correctness — they sit first so the priciest tier is easy to spot.
+      # The .1 models break the usual 0.1x cache-read multiplier: their cache
+      # hits are 0.025x base input ($0.25), so they need their own branch
+      # ahead of the generic `fable|mythos` fallback. Cache reads dominate a
+      # Claude Code day, so folding them into the $1.00 row over-reports a
+      # heavy Fable 5.1 day by more than 2x.
       # Opus 4.5+ is priced 1/3 of older Opus (4.1, 3) — Anthropic dropped the
       # rate for the newer models. The newer branch must be matched *before* the
       # generic `opus` fallback so it wins for `claude-opus-4-7-…` etc. Sonnet 5+
-      # gets its own branch before the generic `sonnet` fallback because it
-      # launched on introductory pricing ($2/$10) — a date gate (bash `s5_std`,
-      # passed into jq as `$s5std`) swaps to the standard $3/$15 at the
-      # 2026-09-01 cutover, while Sonnet 4.6 and earlier stay $3/$15 throughout. Haiku
+      # gets its own branch before the generic `sonnet` fallback because its
+      # $2/$10 launch rate — originally announced as introductory pricing
+      # through 2026-08-31 — was made permanent, while Sonnet 4.6 and earlier
+      # stay $3/$15. Haiku
       # 4.x is its own bucket ($1/$5 with 1h cache write $2 — note 2x not 2.5x).
       # Haiku 3.5 is matched before legacy Haiku 3 so `claude-3-5-haiku-…`
       # doesn't fall into the cheaper bucket. Any model with no row here returns
@@ -222,14 +222,14 @@ if [[ "$need_recompute" == "true" ]]; then
       # exit code is captured and the next block falls back to the cached
       # value instead of crashing the render.
       jq_exit=0
-      jq_raw=$(jq -n -r --argjson lo "$day_lo" --argjson hi "$day_hi" --argjson s5std "$s5_std" '
+      jq_raw=$(jq -n -r --argjson lo "$day_lo" --argjson hi "$day_hi" '
         def model_rate($m):
           ($m | ascii_downcase) as $lm
-          | if   ($lm | test("fable|mythos"))             then {i:10,   o:50,   cw5:12.50,  cw1h:20,    cr:1.00}
+          | if   ($lm | test("fable-5-1|mythos-5-1"))      then {i:10,   o:50,   cw5:12.50,  cw1h:20,    cr:0.25}
+            elif ($lm | test("fable|mythos"))              then {i:10,   o:50,   cw5:12.50,  cw1h:20,    cr:1.00}
             elif ($lm | test("opus-4-[5-9]|opus-[5-9]"))   then {i:5,    o:25,   cw5:6.25,   cw1h:10,    cr:0.50}
             elif ($lm | test("opus"))                      then {i:15,   o:75,   cw5:18.75,  cw1h:30,    cr:1.50}
-            elif ($lm | test("sonnet-5|sonnet-[6-9]"))     then (if $s5std then {i:3, o:15, cw5:3.75, cw1h:6, cr:0.30}
-                                                                          else {i:2, o:10, cw5:2.50, cw1h:4, cr:0.20} end)
+            elif ($lm | test("sonnet-5|sonnet-[6-9]"))     then {i:2,    o:10,   cw5:2.50,   cw1h:4,     cr:0.20}
             elif ($lm | test("sonnet"))                    then {i:3,    o:15,   cw5:3.75,   cw1h:6,     cr:0.30}
             elif ($lm | test("haiku-4|haiku-[5-9]"))       then {i:1,    o:5,    cw5:1.25,   cw1h:2,     cr:0.10}
             elif ($lm | test("3-5-haiku|haiku-3-5"))       then {i:0.80, o:4,    cw5:1,      cw1h:1.60,  cr:0.08}
@@ -314,19 +314,118 @@ make_bar() {
   printf '%b%s%b' "$bar_color" "$bar" "$RESET"
 }
 
-# --- Get repo name ---
+# --- Helper: reduce a branch or worktree name to its comparable core ---
+# The same piece of work reaches the branch and the folder through different
+# tools, each with its own idea of a legal name: `claude -w` can't put a slash
+# in a branch, so a launcher asking for `gb/fix/x` lands on the folder
+# `gb+fix+x` and the branch `worktree-gb+fix+x`, which a start hook later
+# renames back to `gb/fix/x`. Folding `/` and `+` to one separator and dropping
+# the `worktree-` marker makes those spellings compare equal without any
+# configuration, which is what keeps line 2 from printing the same name twice.
+normalize_name() {
+  printf '%s' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's|^worktree-||; s|[/+]|-|g; s|-+|-|g; s|^-||; s|-$||'
+}
+
+# --- Helper: drop a configured prefix for display ---
+# Entries in STATUSLINE_IGNORE_PREFIXES are glob patterns anchored at the
+# start, so one `gb/*/` covers every category in a `gb/<category>/<slug>`
+# convention. $prefix is deliberately unquoted in both the test and the
+# expansion — quoting it would match the wildcard literally and defeat the
+# point.
+strip_ignored_prefix() {
+  local name=$1
+  local prefix stripped
+  if (( ${#ignore_prefixes[@]} == 0 )); then
+    printf '%s' "$name"
+    return
+  fi
+  for prefix in "${ignore_prefixes[@]}"; do
+    if [[ "$name" == $prefix* ]]; then
+      stripped=${name#$prefix}
+      # A pattern that would eat the whole name leaves nothing to identify the
+      # worktree by, so that entry is skipped rather than blanking the line.
+      if [[ -n "$stripped" ]]; then
+        printf '%s' "$stripped"
+        return
+      fi
+    fi
+  done
+  printf '%s' "$name"
+}
+
+# --- Helper: make a git path absolute ---
+# `git rev-parse` reports these relative to the directory it was invoked from
+# (the `-C` target), not the checkout root: from a subdirectory of an ordinary
+# repo `--git-common-dir` comes back as `../../.git`. Resolving that against the
+# wrong base, or leaving the `..` segments in, breaks the string compare below.
+absolute_git_path() {
+  local path=$1
+  [[ -z "$path" ]] && return
+  if [[ "$path" == /* ]]; then
+    printf '%s' "$path"
+    return
+  fi
+  # cd + pwd -P canonicalizes without needing realpath, which macOS lacks. The
+  # `|| true` is load-bearing: a failed cd (a stale cwd, a path git spelled in a
+  # way we can't follow) would otherwise take the whole render down with it
+  # under `set -e`. Returning empty instead just leaves worktree detection off.
+  ( cd "${cwd:-.}/${path}" 2>/dev/null && pwd -P ) || true
+}
+
+# --- Get repo name and worktree ---
+# One rev-parse yields all three facts: the checkout root, the shared repo
+# directory, and this checkout's own git dir. A linked worktree is exactly the
+# case where the last two differ — its git dir lives under
+# <common>/worktrees/<name> while the common dir stays with the main checkout.
 repo_name=""
 in_git_repo=false
+in_worktree=false
+worktree_name=""
 toplevel=""
+git_common_dir=""
+git_dir=""
+git_facts=""
 if [[ -n "$cwd" ]]; then
-  toplevel=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)
+  git_facts=$(git -C "$cwd" rev-parse --show-toplevel --git-common-dir --git-dir 2>/dev/null || true)
 fi
-if [[ -z "$toplevel" && -z "$cwd" ]]; then
-  toplevel=$(git rev-parse --show-toplevel 2>/dev/null || true)
+if [[ -z "$git_facts" && -z "$cwd" ]]; then
+  git_facts=$(git rev-parse --show-toplevel --git-common-dir --git-dir 2>/dev/null || true)
+fi
+if [[ -n "$git_facts" ]]; then
+  toplevel=$(printf '%s\n' "$git_facts" | sed -n '1p')
+  git_common_dir=$(printf '%s\n' "$git_facts" | sed -n '2p')
+  git_dir=$(printf '%s\n' "$git_facts" | sed -n '3p')
 fi
 if [[ -n "$toplevel" ]]; then
   repo_name=$(basename "$toplevel")
   in_git_repo=true
+  # An ordinary checkout has a `.git` directory; a linked worktree and a
+  # submodule each have a `.git` *file* pointing at the real git dir. Gating on
+  # that keeps the common case free of path arithmetic entirely, and stops a
+  # relative `--git-common-dir` from making an ordinary repo look like a
+  # worktree when the session starts in a subdirectory.
+  if [[ -f "${toplevel}/.git" ]]; then
+    git_common_dir=$(absolute_git_path "$git_common_dir")
+    git_dir=$(absolute_git_path "$git_dir")
+    # The two are equal in a submodule and differ in a linked worktree, whose
+    # git dir sits under <common>/worktrees/<name>.
+    if [[ -n "$git_common_dir" && -n "$git_dir" && "$git_common_dir" != "$git_dir" ]]; then
+      in_worktree=true
+      worktree_name="$repo_name"
+      # The repo's real name is the main checkout's folder, one level above the
+      # shared .git — without this, line 1 would name the worktree instead and
+      # several concurrent worktrees would be indistinguishable from each other.
+      # Only when the common dir is a conventional ".git" folder — a bare repo's
+      # common dir is the repo itself (…/foo.git), whose parent names the
+      # containing folder rather than the repo, so keep the worktree name there.
+      if [[ "$(basename "$git_common_dir")" == ".git" ]]; then
+        main_name=$(basename "$(dirname "$git_common_dir")")
+        [[ -n "$main_name" && "$main_name" != "." && "$main_name" != "/" ]] && repo_name="$main_name"
+      fi
+    fi
+  fi
 elif [[ -n "$cwd" ]]; then
   # Fallback: not in a git repo, show the current folder name (handles paths with spaces)
   repo_name=$(basename "$cwd")
@@ -346,140 +445,90 @@ fi
 branch_line_budget=$(( term_width - 3 - 2 ))
 if (( branch_line_budget < 20 )); then branch_line_budget=20; fi
 
-# --- Get branch info (rendered alone on its own line) ---
-branch_info=""
-current_branch=$(git branch --show-current 2>/dev/null || echo "")
-if [[ "$current_branch" == "gitbutler/workspace" ]]; then
-  branch_emoji="🌿"
-  branch_names=()
-  if command -v but &>/dev/null; then
-    while IFS= read -r b; do
-      [[ -n "$b" ]] && branch_names+=("$b")
-    done < <(but branch list --no-check --no-ahead --json 2>/dev/null \
-      | jq -r '.appliedStacks[].heads[].name' 2>/dev/null || true)
-  fi
-  branch_count=${#branch_names[@]}
-
-  if (( branch_count == 0 )); then
-    branch_info="${branch_emoji} gitbutler/workspace"
-  elif (( branch_count == 1 )); then
-    name="${branch_names[0]}"
-    if (( ${#name} > branch_line_budget )); then
-      name="${name:0:$((branch_line_budget - 1))}…"
-    fi
-    branch_info="${branch_emoji} ${name}"
-  else
-    # Pack as many full names as fit, then suffix " + N more" for the remainder.
-    shown=""
-    shown_count=0
-    for name in "${branch_names[@]}"; do
-      if [[ -n "$shown" ]]; then
-        candidate="${shown}, ${name}"
-      else
-        candidate="${name}"
-      fi
-      remaining_after=$(( branch_count - shown_count - 1 ))
-      suffix=""
-      (( remaining_after > 0 )) && suffix=" + ${remaining_after} more"
-      if (( ${#candidate} + ${#suffix} <= branch_line_budget )); then
-        shown="$candidate"
-        shown_count=$(( shown_count + 1 ))
-      else
-        break
-      fi
-    done
-    if (( shown_count == 0 )); then
-      # Even the first name doesn't fit — truncate it and summarise the rest.
-      remaining_after=$(( branch_count - 1 ))
-      suffix=" + ${remaining_after} more"
-      first_budget=$(( branch_line_budget - ${#suffix} ))
-      (( first_budget < 8 )) && first_budget=8
-      first="${branch_names[0]}"
-      if (( ${#first} > first_budget )); then
-        first="${first:0:$((first_budget - 1))}…"
-      fi
-      branch_info="${branch_emoji} ${first}${suffix}"
-    else
-      remaining_after=$(( branch_count - shown_count ))
-      if (( remaining_after > 0 )); then
-        branch_info="${branch_emoji} ${shown} + ${remaining_after} more"
-      else
-        branch_info="${branch_emoji} ${shown}"
-      fi
-    fi
-  fi
-elif [[ -n "$current_branch" ]]; then
-  truncated_branch="$current_branch"
-  if (( ${#truncated_branch} > branch_line_budget )); then
-    truncated_branch="${truncated_branch:0:$((branch_line_budget - 1))}…"
-  fi
-  branch_info="🔀 ${truncated_branch}"
+# --- Prefixes to hide from the displayed name ---
+# Comma-separated, empty by default. Each entry is a glob anchored at the start
+# of the name, so a `gb/<category>/<slug>` convention needs one `gb/*/` rather
+# than a row per category.
+ignore_prefixes=()
+if [[ -n "${STATUSLINE_IGNORE_PREFIXES:-}" ]]; then
+  IFS=',' read -r -a raw_ignore_prefixes <<< "${STATUSLINE_IGNORE_PREFIXES}"
+  for raw_prefix in "${raw_ignore_prefixes[@]:-}"; do
+    # Trim surrounding whitespace so "gb/*/, worktree-" is as valid as
+    # "gb/*/,worktree-", and drop the empties a trailing comma leaves behind.
+    raw_prefix="${raw_prefix#"${raw_prefix%%[![:space:]]*}"}"
+    raw_prefix="${raw_prefix%"${raw_prefix##*[![:space:]]}"}"
+    [[ -n "$raw_prefix" ]] && ignore_prefixes+=("$raw_prefix")
+  done
 fi
 
-# --- Shunt sidings (its own line, directly below the branch line) ---
-# Resolving sidings shells out to `shunt-dev active --json` (~0.15s) — too slow
-# to run on every render — so the result is cached per-cwd for 30s. Repos that
-# aren't shunt apps cache an empty result too, so the common (non-shunt) case
-# pays that cost at most once per 30s instead of on every keystroke.
-shunt_line=""
-if command -v shunt-dev &>/dev/null && [[ -n "$cwd" ]]; then
-  shunt_now=$(date +%s)
-  shunt_info=""
-  # cwd is the cache key: `shunt-dev active` resolves both the project and which
-  # siding we're in from the working directory, so two worktrees of the same
-  # project must not share an entry. cksum's CRC + byte-count (joined with a
-  # dash to stay filename-safe) is the digest; folding in the length shrinks
-  # the collision risk of the CRC alone. The `|| true` keeps a missing/failed
-  # cksum from aborting the render under `set -e` — an empty hash just falls
-  # back to "default" below.
-  cwd_hash=$(printf '%s' "$cwd" | cksum 2>/dev/null | awk '{print $1 "-" $2}' || true)
-  [[ "$cwd_hash" =~ ^[0-9]+-[0-9]+$ ]] || cwd_hash="default"
-  shunt_cache_file="${INSTALL_DIR}/.shunt-cache-${cwd_hash}"
-  shunt_cache_hit=false
-  if [[ -f "$shunt_cache_file" ]]; then
-    shunt_ts=$(sed -n '2p' "$shunt_cache_file" 2>/dev/null || echo 0)
-    [[ "$shunt_ts" =~ ^[0-9]+$ ]] || shunt_ts=0
-    if (( shunt_now - shunt_ts < 30 )); then
-      # Line 1 holds the display payload, which is legitimately empty when the
-      # repo isn't a shunt app — read it verbatim so an empty value still counts
-      # as a hit and suppresses the reshell for the full TTL.
-      shunt_info=$(sed -n '1p' "$shunt_cache_file" 2>/dev/null || echo "")
-      shunt_cache_hit=true
-    fi
+# --- Worktree + branch (rendered alone on its own line) ---
+# Composed as one string so the width check lives in one place: this line must
+# never wrap, and both parts share a single budget.
+branch_info=""
+current_branch=$(git -C "${cwd:-.}" branch --show-current 2>/dev/null || echo "")
+
+worktree_part=""
+branch_part=""
+if [[ "$in_worktree" == "true" && -n "$worktree_name" ]]; then
+  # A worktree is named after its branch or the branch after the worktree, so
+  # printing both would spend half the line saying the same thing twice. Compare
+  # the normalized cores, which sees through the separator and `worktree-`
+  # differences the various tools introduce.
+  branch_core=$(normalize_name "$current_branch")
+  worktree_core=$(normalize_name "$worktree_name")
+  # Padding both sides with the separator forces the containment test onto
+  # component boundaries. Without it a worktree folder called `fix` folds into a
+  # branch called `prefix-logging`, because the characters happen to appear
+  # inside a longer word, and the folder name disappears from the line.
+  branch_padded="-${branch_core}-"
+  worktree_padded="-${worktree_core}-"
+  if [[ -n "$current_branch" && -n "$branch_core" && -n "$worktree_core" \
+        && ( "$branch_core" == "$worktree_core" \
+             || "$branch_padded" == *"-${worktree_core}-"* \
+             || "$worktree_padded" == *"-${branch_core}-"* ) ]]; then
+    # The 🌳 alone carries "this is a worktree". Show the branch: it is the name
+    # that was chosen for the work, where the folder is whatever the tool that
+    # created the worktree was able to spell.
+    worktree_part=$(strip_ignored_prefix "$current_branch")
+  else
+    # Unrelated names, or a detached HEAD (empty branch) where the worktree
+    # name is the only handle on where this session is working. The branch keeps
+    # its prefix here — when the two disagree, the prefix is the part worth
+    # seeing.
+    worktree_part="$worktree_name"
+    branch_part="$current_branch"
   fi
-  if [[ "$shunt_cache_hit" != "true" ]]; then
-    # `active` exits non-zero for non-shunt dirs but still prints its JSON, so
-    # `|| true` keeps `set -e` happy while we let jq's .active gate decide.
-    shunt_json=$(cd "$cwd" 2>/dev/null && shunt-dev active --json 2>/dev/null || true)
-    if [[ -n "$shunt_json" ]]; then
-      # One siding per line as "<flag>\t<name>", excluding `host` (the run-local
-      # pseudo-entry, not a real siding). flag=1 marks the siding whose worktree
-      # contains the current cwd — the one this session is editing — which awk
-      # then decorates with a ★.
-      shunt_info=$(printf '%s' "$shunt_json" | jq -r --arg cwd "$cwd" '
-        select(.active == true)
-        | [ .sidings[] | select(.name != "host") ]
-        | sort_by(.name)
-        | .[]
-        | .src as $src
-        | (if $cwd == $src or ($cwd | startswith($src + "/")) then "1" else "0" end)
-          + "\t" + .name
-      ' 2>/dev/null \
-        | awk -F'\t' '
-            { name=$2; if ($1=="1") name=name" ★"
-              out = (out=="" ? name : out ", " name) }
-            END { if (out!="") print out }' \
-        || true)
-    fi
-    mkdir -p "$INSTALL_DIR" 2>/dev/null || true
-    printf '%s\n%s\n' "$shunt_info" "$shunt_now" > "$shunt_cache_file" 2>/dev/null || true
+elif [[ -n "$current_branch" ]]; then
+  branch_part="$current_branch"
+fi
+
+if [[ -n "$worktree_part" && -n "$branch_part" ]]; then
+  # Both parts present: the separator and the second emoji come out of the
+  # budget too. The worktree name is what tells concurrent sessions apart, so
+  # the branch is what gives up characters.
+  pair_overhead=$(( 3 + 2 + 1 ))   # " · " plus the second emoji and its space
+  branch_budget=$(( branch_line_budget - pair_overhead - ${#worktree_part} ))
+  if (( branch_budget < 8 )); then
+    # Not enough room left for a branch name that still means anything.
+    branch_part=""
+  elif (( ${#branch_part} > branch_budget )); then
+    branch_part="${branch_part:0:$((branch_budget - 1))}…"
   fi
-  if [[ -n "$shunt_info" ]]; then
-    if (( ${#shunt_info} > branch_line_budget )); then
-      shunt_info="${shunt_info:0:$((branch_line_budget - 1))}…"
-    fi
-    shunt_line="🚂 ${shunt_info}"
-  fi
+fi
+
+if (( ${#worktree_part} > branch_line_budget )); then
+  worktree_part="${worktree_part:0:$((branch_line_budget - 1))}…"
+fi
+if [[ -z "$worktree_part" ]] && (( ${#branch_part} > branch_line_budget )); then
+  branch_part="${branch_part:0:$((branch_line_budget - 1))}…"
+fi
+
+if [[ -n "$worktree_part" && -n "$branch_part" ]]; then
+  branch_info="🌳 ${worktree_part} · 🔀 ${branch_part}"
+elif [[ -n "$worktree_part" ]]; then
+  branch_info="🌳 ${worktree_part}"
+elif [[ -n "$branch_part" ]]; then
+  branch_info="🔀 ${branch_part}"
 fi
 
 # --- Model display ---
@@ -579,13 +628,9 @@ fi
 [[ -n "$effort_display" ]] && line1_parts+=("$effort_display")
 [[ -n "$thinking_display" ]] && line1_parts+=("$thinking_display")
 
-# Line 2: Branches (alone — gets the full terminal width)
+# Line 2: Worktree + branch (alone — gets the full terminal width)
 line2_parts=()
 [[ -n "$branch_info" ]] && line2_parts+=("$branch_info")
-
-# Line 2b: Shunt sidings (alone, directly below the branch line)
-line_shunt_parts=()
-[[ -n "$shunt_line" ]] && line_shunt_parts+=("$shunt_line")
 
 # Line 3: Spend & limits — session cost, daily cost, rate limit
 line3_parts=()
@@ -619,10 +664,6 @@ fi
 if (( ${#line2_parts[@]} > 0 )); then
   [[ -n "$output" ]] && output+=$'\n'
   output+=$(join_parts "${line2_parts[@]}")
-fi
-if (( ${#line_shunt_parts[@]} > 0 )); then
-  [[ -n "$output" ]] && output+=$'\n'
-  output+=$(join_parts "${line_shunt_parts[@]}")
 fi
 if (( ${#line3_parts[@]} > 0 )); then
   [[ -n "$output" ]] && output+=$'\n'
