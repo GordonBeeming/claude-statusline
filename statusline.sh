@@ -55,7 +55,7 @@ auto_update
 # --- Read stdin (session JSON) ---
 stdin_data=$(cat)
 
-# --- Extract all fields from JSON in one jq call ---
+#--- Extract all fields from JSON in one jq call ---
 eval "$(echo "$stdin_data" | jq -r '
   @sh "cwd=\(.workspace.current_dir // .cwd // "")",
   @sh "model_name=\(.model.display_name // "")",
@@ -71,6 +71,7 @@ eval "$(echo "$stdin_data" | jq -r '
   @sh "effort_level=\(.effort.level // "")",
   @sh "thinking_enabled=\(.thinking.enabled // false)"
 ' 2>/dev/null || echo 'cwd=""; model_name=""; model_id=""; session_cost_usd=0; duration_ms=0; ctx_pct=0; ctx_size=0; total_input=0; total_output=0; five_hour_pct=""; five_hour_resets=""; effort_level=""; thinking_enabled=false')"
+
 
 # --- Currency, FX rate, and daily cost (self-contained — no external CLI) ---
 # Currency picked via STATUSLINE_CURRENCY (default AUD). USD short-circuits the
@@ -309,8 +310,12 @@ make_bar() {
   if (( pct >= 90 )); then bar_color="$RED"
   elif (( pct >= 70 )); then bar_color="$YELLOW"
   else bar_color="$GREEN"; fi
-  local bar
-  bar=$(printf "%${filled}s" | tr ' ' '█')$(printf "%${empty}s" | tr ' ' '░')
+  local bar filled_bar empty_bar
+  printf -v filled_bar "%${filled}s" ""
+  filled_bar=${filled_bar// /█}
+  printf -v empty_bar "%${empty}s" ""
+  empty_bar=${empty_bar// /░}
+  bar="${filled_bar}${empty_bar}"
   printf '%b%s%b' "$bar_color" "$bar" "$RESET"
 }
 
