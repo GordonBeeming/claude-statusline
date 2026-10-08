@@ -433,12 +433,17 @@ if [[ -n "$toplevel" ]]; then
       # The repo's real name is the main checkout's folder, one level above the
       # shared .git — without this, line 1 would name the worktree instead and
       # several concurrent worktrees would be indistinguishable from each other.
-      # Only when the common dir is a conventional ".git" folder — a bare repo's
-      # common dir is the repo itself (…/foo.git), whose parent names the
-      # containing folder rather than the repo, so keep the worktree name there.
-      if [[ "$(basename "$git_common_dir")" == ".git" ]]; then
+      # A bare repo's common dir is the repo itself (…/foo.git), whose parent
+      # names the containing folder rather than the repo, so the name comes from
+      # the directory itself with the suffix dropped. A bare dir without the
+      # `.git` suffix gives no reliable repo name, so keep the worktree name.
+      common_base=$(basename "$git_common_dir")
+      if [[ "$common_base" == ".git" ]]; then
         main_name=$(basename "$(dirname "$git_common_dir")")
         [[ -n "$main_name" && "$main_name" != "." && "$main_name" != "/" ]] && repo_name="$main_name"
+      elif [[ "$common_base" == *.git ]]; then
+        main_name=${common_base%.git}
+        [[ -n "$main_name" ]] && repo_name="$main_name"
       fi
     fi
   fi
