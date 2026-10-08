@@ -201,6 +201,11 @@ if [[ "$need_recompute" == "true" ]]; then
       # one model priced by prompt length — over 100k prompt tokens (uncached
       # input + cache reads + cache writes) every category moves to the higher
       # tier — so model_rate takes the usage record as well as the model id.
+      # That tier is per model call, and a response that ran server-side tools
+      # sums several calls into its top-level usage, so each entry in
+      # `usage.iterations` is priced on its own when the record has them.
+      # Fast mode (`usage.speed == "fast"`) on Opus 5.5 / 5 / 4.8 doubles the
+      # base rate, and the cache multipliers stack on the doubled input price.
       # Opus 4.5+ is priced 1/3 of older Opus (4.1, 3) — Anthropic dropped the
       # rate for the newer models. The newer branch must be matched *before* the
       # generic `opus` fallback so it wins for `claude-opus-4-7-…` etc. Sonnet 5+
@@ -234,11 +239,14 @@ if [[ "$need_recompute" == "true" ]]; then
           + ($u.cache_creation_input_tokens
              // (($u.cache_creation.ephemeral_5m_input_tokens // 0)
                  + ($u.cache_creation.ephemeral_1h_input_tokens // 0)));
-        def model_rate($m; $u):
+        def model_rate($m; $u; $fast):
           ($m | ascii_downcase) as $lm
           | if   ($lm | test("fable-5-1|mythos-5-1"))      then {i:10,   o:50,   cw5:12.50,  cw1h:20,    cr:0.25}
             elif ($lm | test("fable|mythos"))              then {i:10,   o:50,   cw5:12.50,  cw1h:20,    cr:1.00}
-            elif ($lm | test("opus-5-5"))                  then {i:4,    o:20,   cw5:5,      cw1h:8,     cr:0.20}
+            elif ($lm | test("opus-5-5"))                  then (if $fast
+                                                                 then {i:8,  o:40, cw5:10,    cw1h:16, cr:0.40}
+                                                                 else {i:4,  o:20, cw5:5,     cw1h:8,  cr:0.20} end)
+            elif $fast and ($lm | test("opus-5|opus-4-8")) then {i:10,   o:50,   cw5:12.50,  cw1h:20,    cr:1.00}
             elif ($lm | test("opus-4-[5-9]|opus-[5-9]"))   then {i:5,    o:25,   cw5:6.25,   cw1h:10,    cr:0.50}
             elif ($lm | test("opus"))                      then {i:15,   o:75,   cw5:18.75,  cw1h:30,    cr:1.50}
             elif ($lm | test("sonnet-5-5"))                then {i:2,    o:10,   cw5:2.50,   cw1h:4,     cr:0.10}
@@ -256,22 +264,27 @@ if [[ "$need_recompute" == "true" ]]; then
           | select(.timestamp != null and (.message.usage // null) != null and (.message.model // null) != null)
           | (((.timestamp[0:19] + "Z") | fromdateiso8601?) // 0) as $ts
           | select($ts >= $lo and $ts < $hi)
-          | select(model_rate(.message.model; .message.usage) != null)
+          | select(model_rate(.message.model; .message.usage; false) != null)
         ]
         | (map(select((.message.id // "") != "" or (.requestId // "") != ""))
             | unique_by((.message.id // "") + "|" + (.requestId // "")))
           + map(select((.message.id // "") == "" and (.requestId // "") == ""))
         | .[]
+        | .message.model as $m
         | .message.usage as $u
-        | model_rate(.message.model; $u) as $r
-        | ((($u.input_tokens // 0)              * $r.i)
-          + (($u.output_tokens // 0)            * $r.o)
-          + (($u.cache_read_input_tokens // 0)  * $r.cr)
-          + (if ($u.cache_creation // null) != null
-               then (($u.cache_creation.ephemeral_5m_input_tokens // 0) * $r.cw5)
-                  + (($u.cache_creation.ephemeral_1h_input_tokens // 0) * $r.cw1h)
-               else (($u.cache_creation_input_tokens // 0) * $r.cw5)
-             end)) / 1000000
+        | ($u.speed == "fast") as $fast
+        | (if (($u.iterations // []) | length) > 0 then $u.iterations else [$u] end)
+        | map(. as $c
+              | model_rate($m; $c; $fast) as $r
+              | (($c.input_tokens // 0)              * $r.i)
+              + (($c.output_tokens // 0)            * $r.o)
+              + (($c.cache_read_input_tokens // 0)  * $r.cr)
+              + (if ($c.cache_creation // null) != null
+                   then (($c.cache_creation.ephemeral_5m_input_tokens // 0) * $r.cw5)
+                      + (($c.cache_creation.ephemeral_1h_input_tokens // 0) * $r.cw1h)
+                   else (($c.cache_creation_input_tokens // 0) * $r.cw5)
+                 end))
+        | add / 1000000
       ' "${jsonl_files[@]}" 2>/dev/null) || jq_exit=$?
       if [[ "$jq_exit" -eq 0 ]]; then
         daily_cost_usd=$(printf '%s\n' "$jq_raw" | awk 'BEGIN{s=0} {s+=$1} END{printf "%.4f", s+0}')
