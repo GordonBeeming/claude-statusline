@@ -195,6 +195,17 @@ if [[ "$need_recompute" == "true" ]]; then
       # ahead of the generic `fable|mythos` fallback. Cache reads dominate a
       # Claude Code day, so folding them into the $1.00 row over-reports a
       # heavy Fable 5.1 day by more than 2x.
+      # Opus 5.5 and Sonnet 5.5 have their own rows ahead of the broader
+      # `opus-[5-9]` / `sonnet-5` patterns: Opus 5.5 drops to $4/$20, and both
+      # bill cache hits at 0.05x base input rather than 0.1x. Haiku 5.5 is the
+      # one model priced by prompt length — over 100k prompt tokens (uncached
+      # input + cache reads + cache writes) every category moves to the higher
+      # tier — so model_rate takes the usage record as well as the model id.
+      # That tier is per model call, and a response that ran server-side tools
+      # sums several calls into its top-level usage, so each entry in
+      # `usage.iterations` is priced on its own when the record has them.
+      # Fast mode (`usage.speed == "fast"`) on Opus 5.5 / 5 / 4.8 doubles the
+      # base rate, and the cache multipliers stack on the doubled input price.
       # Opus 4.5+ is priced 1/3 of older Opus (4.1, 3) — Anthropic dropped the
       # rate for the newer models. The newer branch must be matched *before* the
       # generic `opus` fallback so it wins for `claude-opus-4-7-…` etc. Sonnet 5+
@@ -223,14 +234,27 @@ if [[ "$need_recompute" == "true" ]]; then
       # value instead of crashing the render.
       jq_exit=0
       jq_raw=$(jq -n -r --argjson lo "$day_lo" --argjson hi "$day_hi" '
-        def model_rate($m):
+        def prompt_tokens($u):
+          ($u.input_tokens // 0) + ($u.cache_read_input_tokens // 0)
+          + ($u.cache_creation_input_tokens
+             // (($u.cache_creation.ephemeral_5m_input_tokens // 0)
+                 + ($u.cache_creation.ephemeral_1h_input_tokens // 0)));
+        def model_rate($m; $u; $fast):
           ($m | ascii_downcase) as $lm
           | if   ($lm | test("fable-5-1|mythos-5-1"))      then {i:10,   o:50,   cw5:12.50,  cw1h:20,    cr:0.25}
             elif ($lm | test("fable|mythos"))              then {i:10,   o:50,   cw5:12.50,  cw1h:20,    cr:1.00}
+            elif ($lm | test("opus-5-5"))                  then (if $fast
+                                                                 then {i:8,  o:40, cw5:10,    cw1h:16, cr:0.40}
+                                                                 else {i:4,  o:20, cw5:5,     cw1h:8,  cr:0.20} end)
+            elif $fast and ($lm | test("opus-5|opus-4-8")) then {i:10,   o:50,   cw5:12.50,  cw1h:20,    cr:1.00}
             elif ($lm | test("opus-4-[5-9]|opus-[5-9]"))   then {i:5,    o:25,   cw5:6.25,   cw1h:10,    cr:0.50}
             elif ($lm | test("opus"))                      then {i:15,   o:75,   cw5:18.75,  cw1h:30,    cr:1.50}
+            elif ($lm | test("sonnet-5-5"))                then {i:2,    o:10,   cw5:2.50,   cw1h:4,     cr:0.10}
             elif ($lm | test("sonnet-5|sonnet-[6-9]"))     then {i:2,    o:10,   cw5:2.50,   cw1h:4,     cr:0.20}
             elif ($lm | test("sonnet"))                    then {i:3,    o:15,   cw5:3.75,   cw1h:6,     cr:0.30}
+            elif ($lm | test("haiku-5-5"))                 then (if prompt_tokens($u) > 100000
+                                                                 then {i:0.50, o:2.50, cw5:0.625, cw1h:1,    cr:0.05}
+                                                                 else {i:0.10, o:0.50, cw5:0.125, cw1h:0.20, cr:0.01} end)
             elif ($lm | test("haiku-4|haiku-[5-9]"))       then {i:1,    o:5,    cw5:1.25,   cw1h:2,     cr:0.10}
             elif ($lm | test("3-5-haiku|haiku-3-5"))       then {i:0.80, o:4,    cw5:1,      cw1h:1.60,  cr:0.08}
             elif ($lm | test("3-haiku|haiku-3"))           then {i:0.25, o:1.25, cw5:0.3125, cw1h:0.50,  cr:0.025}
@@ -240,22 +264,27 @@ if [[ "$need_recompute" == "true" ]]; then
           | select(.timestamp != null and (.message.usage // null) != null and (.message.model // null) != null)
           | (((.timestamp[0:19] + "Z") | fromdateiso8601?) // 0) as $ts
           | select($ts >= $lo and $ts < $hi)
-          | select(model_rate(.message.model) != null)
+          | select(model_rate(.message.model; .message.usage; false) != null)
         ]
         | (map(select((.message.id // "") != "" or (.requestId // "") != ""))
             | unique_by((.message.id // "") + "|" + (.requestId // "")))
           + map(select((.message.id // "") == "" and (.requestId // "") == ""))
         | .[]
-        | model_rate(.message.model) as $r
+        | .message.model as $m
         | .message.usage as $u
-        | ((($u.input_tokens // 0)              * $r.i)
-          + (($u.output_tokens // 0)            * $r.o)
-          + (($u.cache_read_input_tokens // 0)  * $r.cr)
-          + (if ($u.cache_creation // null) != null
-               then (($u.cache_creation.ephemeral_5m_input_tokens // 0) * $r.cw5)
-                  + (($u.cache_creation.ephemeral_1h_input_tokens // 0) * $r.cw1h)
-               else (($u.cache_creation_input_tokens // 0) * $r.cw5)
-             end)) / 1000000
+        | ($u.speed == "fast") as $fast
+        | (if (($u.iterations // []) | length) > 0 then $u.iterations else [$u] end)
+        | map(. as $c
+              | model_rate($m; $c; $fast) as $r
+              | (($c.input_tokens // 0)              * $r.i)
+              + (($c.output_tokens // 0)            * $r.o)
+              + (($c.cache_read_input_tokens // 0)  * $r.cr)
+              + (if ($c.cache_creation // null) != null
+                   then (($c.cache_creation.ephemeral_5m_input_tokens // 0) * $r.cw5)
+                      + (($c.cache_creation.ephemeral_1h_input_tokens // 0) * $r.cw1h)
+                   else (($c.cache_creation_input_tokens // 0) * $r.cw5)
+                 end))
+        | add / 1000000
       ' "${jsonl_files[@]}" 2>/dev/null) || jq_exit=$?
       if [[ "$jq_exit" -eq 0 ]]; then
         daily_cost_usd=$(printf '%s\n' "$jq_raw" | awk 'BEGIN{s=0} {s+=$1} END{printf "%.4f", s+0}')
@@ -417,12 +446,17 @@ if [[ -n "$toplevel" ]]; then
       # The repo's real name is the main checkout's folder, one level above the
       # shared .git — without this, line 1 would name the worktree instead and
       # several concurrent worktrees would be indistinguishable from each other.
-      # Only when the common dir is a conventional ".git" folder — a bare repo's
-      # common dir is the repo itself (…/foo.git), whose parent names the
-      # containing folder rather than the repo, so keep the worktree name there.
-      if [[ "$(basename "$git_common_dir")" == ".git" ]]; then
+      # A bare repo's common dir is the repo itself (…/foo.git), whose parent
+      # names the containing folder rather than the repo, so the name comes from
+      # the directory itself with the suffix dropped. A bare dir without the
+      # `.git` suffix gives no reliable repo name, so keep the worktree name.
+      common_base=$(basename "$git_common_dir")
+      if [[ "$common_base" == ".git" ]]; then
         main_name=$(basename "$(dirname "$git_common_dir")")
         [[ -n "$main_name" && "$main_name" != "." && "$main_name" != "/" ]] && repo_name="$main_name"
+      elif [[ "$common_base" == *.git ]]; then
+        main_name=${common_base%.git}
+        [[ -n "$main_name" ]] && repo_name="$main_name"
       fi
     fi
   fi
@@ -617,7 +651,11 @@ fi
 # Line 1: Folder + model — folder, model name, effort, thinking flag
 line1_parts=()
 if [[ -n "$repo_name" ]]; then
-  if [[ "$in_git_repo" == "true" ]]; then
+  if [[ "$in_worktree" == "true" && -n "$worktree_name" && "$worktree_name" != "$repo_name" ]]; then
+    # Worktree folders are usually generated names that say nothing about the
+    # project, so pair them with the repo they belong to.
+    line1_parts+=("📂 ${repo_name}/${worktree_name}")
+  elif [[ "$in_git_repo" == "true" ]]; then
     line1_parts+=("📂 ${repo_name}")
   else
     line1_parts+=("📁 ${repo_name}")
